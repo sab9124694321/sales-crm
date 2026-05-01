@@ -8,7 +8,8 @@ require_once 'db.php';
 
 $user_id = $_SESSION['user_id'];
 $role = $_SESSION['role'];
-$showDays = $_GET['days'] ?? 90; // по умолчанию 90 дней (3 месяца)
+$name = $_SESSION['name'];
+$showDays = $_GET['days'] ?? 90;
 
 // Получаем сотрудников
 if ($role == 'admin') {
@@ -23,32 +24,36 @@ if ($role == 'admin') {
 $endDate = date('Y-m-d');
 $startDate = date('Y-m-d', strtotime("-$showDays days"));
 
-// Получаем агрегированные данные за период
+// Получаем агрегированные данные
 $aggregated = [];
-$stmt = $pdo->prepare("
-    SELECT user_id, 
-           SUM(calls) as calls,
-           SUM(calls_answered) as calls_answered,
-           SUM(meetings) as meetings,
-           SUM(contracts) as contracts,
-           SUM(registrations) as registrations,
-           SUM(smart_cash) as smart_cash,
-           SUM(pos_systems) as pos_systems,
-           SUM(inn_leads) as inn_leads,
-           SUM(teams) as teams,
-           SUM(turnover) as turnover,
-           COUNT(DISTINCT report_date) as days_worked
-    FROM daily_reports 
-    WHERE user_id IN (" . implode(',', array_map(function($e) { return $e['id']; }, $employees)) . ")
-      AND report_date BETWEEN ? AND ?
-    GROUP BY user_id
-");
-$stmt->execute([$startDate, $endDate]);
-foreach ($stmt->fetchAll() as $row) {
-    $aggregated[$row['user_id']] = $row;
+if (!empty($employees)) {
+    $ids = array_column($employees, 'id');
+    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+    $stmt = $pdo->prepare("
+        SELECT user_id, 
+               SUM(calls) as calls,
+               SUM(calls_answered) as calls_answered,
+               SUM(meetings) as meetings,
+               SUM(contracts) as contracts,
+               SUM(registrations) as registrations,
+               SUM(smart_cash) as smart_cash,
+               SUM(pos_systems) as pos_systems,
+               SUM(inn_leads) as inn_leads,
+               SUM(teams) as teams,
+               SUM(turnover) as turnover,
+               COUNT(DISTINCT report_date) as days_worked
+        FROM daily_reports 
+        WHERE user_id IN ($placeholders) AND report_date BETWEEN ? AND ?
+        GROUP BY user_id
+    ");
+    $params = array_merge($ids, [$startDate, $endDate]);
+    $stmt->execute($params);
+    foreach ($stmt->fetchAll() as $row) {
+        $aggregated[$row['user_id']] = $row;
+    }
 }
 
-// Планы на месяц
+// Планы
 $plans = [];
 $stmt = $pdo->prepare("SELECT user_id, plan_calls, plan_answered, plan_meetings, plan_contracts, plan_registrations, plan_smart_cash, plan_pos_systems, plan_inn_leads, plan_teams, plan_turnover FROM monthly_plans WHERE year = ? AND month = ?");
 $stmt->execute([date('Y'), date('m')]);
@@ -56,18 +61,22 @@ foreach ($stmt->fetchAll() as $p) {
     $plans[$p['user_id']] = $p;
 }
 
-// Данные для графиков (динамика договоров по дням)
-$chartData = [];
-$stmt = $pdo->prepare("
-    SELECT report_date, SUM(contracts) as total_contracts
-    FROM daily_reports 
-    WHERE user_id IN (" . implode(',', array_map(function($e) { return $e['id']; }, $employees)) . ")
-      AND report_date BETWEEN ? AND ?
-    GROUP BY report_date
-    ORDER BY report_date
-");
-$stmt->execute([$startDate, $endDate]);
-$dailyContracts = $stmt->fetchAll();
+// Данные для графика
+if (!empty($employees)) {
+    $ids = array_column($employees, 'id');
+    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+    $stmt = $pdo->prepare("
+        SELECT report_date, SUM(contracts) as total_contracts
+        FROM daily_reports 
+        WHERE user_id IN ($placeholders) AND report_date BETWEEN ? AND ?
+        GROUP BY report_date
+        ORDER BY report_date
+    ");
+    $stmt->execute(array_merge($ids, [$startDate, $endDate]));
+    $dailyContracts = $stmt->fetchAll();
+} else {
+    $dailyContracts = [];
+}
 ?>
 <!DOCTYPE html>
 <html>
@@ -80,7 +89,8 @@ $dailyContracts = $stmt->fetchAll();
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; }
         .header { background: #1a2c3e; color: white; padding: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
         .header h1 { color: #00a36c; }
-        .nav a, .logout { color: white; text-decoration: none; padding: 8px 16px; border-radius: 8px; background: #00a36c; margin: 5px; display: inline-block; }
+        .nav { display: flex; gap: 15px; flex-wrap: wrap; }
+        .nav a, .logout { color: white; text-decoration: none; padding: 8px 16px; border-radius: 8px; background: #00a36c; }
         .container { max-width: 1400px; margin: 0 auto; padding: 30px 20px; }
         .card { background: white; border-radius: 12px; padding: 20px; margin-bottom: 30px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
@@ -107,12 +117,16 @@ $dailyContracts = $stmt->fetchAll();
 <body>
     <div class="header">
         <h1>Sales CRM</h1>
-        <div>
-            <a href="dashboard.php" class="nav">📊 Дашборд</a>
-            <a href="team.php" class="nav">👥 Команда</a>
-            <?php if ($role === 'admin'): ?>
-            <a href="admin.php" class="nav">⚙️ Админ</a>
-            <?php endif; ?>
+        <div style="display: flex; gap: 20px; align-items: center; flex-wrap: wrap;">
+            <span>👋 <?= htmlspecialchars($name) ?> (<?= htmlspecialchars($role) ?>)</span>
+            <div class="nav">
+                <a href="dashboard.php">📊 Дашборд</a>
+                <a href="team.php">👥 Команда</a>
+                <?php if ($role === 'admin'): ?>
+                <a href="admin.php">⚙️ Админ</a>
+                <?php endif; ?>
+                <a href="region_manager.php">🗺️ Тер. менеджер</a>
+            </div>
             <a href="logout.php" class="logout">Выйти</a>
         </div>
     </div>
@@ -126,7 +140,6 @@ $dailyContracts = $stmt->fetchAll();
             </select>
         </div>
         
-        <!-- Сводная статистика -->
         <div class="stats-grid">
             <?php 
             $totals = ['calls'=>0, 'contracts'=>0, 'meetings'=>0, 'turnover'=>0, 'days_worked'=>0];
@@ -145,15 +158,13 @@ $dailyContracts = $stmt->fetchAll();
             <div class="stat-card"><h3>💰 Оборот (всего)</h3><div class="value"><?= number_format($totals['turnover'], 0, ',', ' ') ?> ₽</div></div>
         </div>
         
-        <!-- График договоров по дням -->
         <div class="card">
             <h3>📈 Динамика договоров по дням</h3>
             <canvas id="contractsChart" style="max-height: 300px;"></canvas>
         </div>
         
-        <!-- Таблица сотрудников -->
         <div class="card">
-            <h3>👥 Детальная статистика команды</h3>
+            <h3>👥 Детальная статистика команды (все 10 показателей)</h3>
             <div class="scroll-table">
                 <table>
                     <thead>
@@ -167,7 +178,7 @@ $dailyContracts = $stmt->fetchAll();
                             <th>💳 Смарт-кассы</th>
                             <th>🖥️ ПОС</th>
                             <th>🔗 ИНН чаевые</th>
-                            <th>👥 Команды</th>
+                            <th>👥 Команды чаевые</th>
                             <th>💰 Оборот</th>
                             <th>Дней</th>
                             <th>Выполнение</th>
@@ -213,31 +224,14 @@ $dailyContracts = $stmt->fetchAll();
             </div>
         </div>
     </div>
-    
     <script>
-        // График динамики договоров
         const dates = <?= json_encode(array_column($dailyContracts, 'report_date')) ?>;
         const contracts = <?= json_encode(array_column($dailyContracts, 'total_contracts')) ?>;
-        
         const ctx = document.getElementById('contractsChart').getContext('2d');
         new Chart(ctx, {
             type: 'line',
-            data: {
-                labels: dates,
-                datasets: [{
-                    label: 'Договоры',
-                    data: contracts,
-                    borderColor: '#00a36c',
-                    backgroundColor: 'rgba(0, 163, 108, 0.1)',
-                    fill: true,
-                    tension: 0.4
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: true,
-                plugins: { legend: { position: 'top' } }
-            }
+            data: { labels: dates, datasets: [{ label: 'Договоры', data: contracts, borderColor: '#00a36c', backgroundColor: 'rgba(0, 163, 108, 0.1)', fill: true, tension: 0.4 }] },
+            options: { responsive: true, maintainAspectRatio: true, plugins: { legend: { position: 'top' } } }
         });
     </script>
 </body>

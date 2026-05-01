@@ -1,0 +1,80 @@
+[
+    {
+        "date": "2026-05-01 17:26:13",
+        "calls": 0,
+        "calls_answered": 0,
+        "meetings": 0,
+        "contracts": 0,
+        "registrations": 0,
+        "smart_cash": 0,
+        "pos_systems": 0,
+        "inn_leads": 0,
+        "teams": 0,
+        "turnover": 0
+    },
+    {
+        "date": "2026-05-01 16:39:05",
+        "calls": 0,
+        "calls_answered": 0,
+        "meetings": 0,
+        "contracts": 0,
+        "registrations": 0,
+        "smart_cash": 0,
+        "pos_systems": 0,
+        "inn_leads": 0,
+        "teams": 0,
+        "turnover": 0
+    },
+    {
+        "date": "2026-05-01 10:29:11",
+        "calls": 20,
+        "calls_answered": 10,
+        "meetings": 2,
+        "contracts": 2,
+        "registrations": 2,
+        "smart_cash": 1,
+        "pos_systems": 1,
+        "inn_leads": 2,
+        "teams": 2,
+        "turnover": 130000
+    },
+    {
+        "date": "2026-05-01 10:28:37",
+        "calls": 0,
+        "calls_answered": 1,
+        "meetings": 1,
+        "contracts": 1,
+        "registrations": 1,
+        "smart_cash": 1,
+        "pos_systems": 1,
+        "inn_leads": 1,
+        "teams": 1,
+        "turnover": 20
+    },
+    {
+        "date": "2026-05-01 10:28:03",
+        "calls": 1,
+        "calls_answered": 1,
+        "meetings": 1,
+        "contracts": 0,
+        "registrations": 0,
+        "smart_cash": 0,
+        "pos_systems": 0,
+        "inn_leads": 0,
+        "teams": 0,
+        "turnover": 0
+    },
+    {
+        "date": "2026-05-01 10:14:32",
+        "calls": 0,
+        "calls_answered": 0,
+        "meetings": 0,
+        "contracts": 0,
+        "registrations": 0,
+        "smart_cash": 0,
+        "pos_systems": 0,
+        "inn_leads": 0,
+        "teams": 0,
+        "turnover": 0
+    }
+]

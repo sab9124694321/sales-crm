@@ -9,9 +9,8 @@ require_once 'db.php';
 $user_id = $_SESSION['user_id'];
 $role = $_SESSION['role'];
 $name = $_SESSION['name'];
-$showDays = $_GET['days'] ?? 90;
 
-// Получаем сотрудников
+// Получаем сотрудников команды
 if ($role == 'admin') {
     $employees = $pdo->query("SELECT id, tabel_number, full_name FROM users WHERE role != 'admin'")->fetchAll();
 } else {
@@ -20,62 +19,105 @@ if ($role == 'admin') {
     $employees = $stmt->fetchAll();
 }
 
-// Период
-$endDate = date('Y-m-d');
-$startDate = date('Y-m-d', strtotime("-$showDays days"));
+$employeeIds = array_column($employees, 'id');
+$placeholders = implode(',', array_fill(0, count($employeeIds), '?'));
 
-// Получаем агрегированные данные
-$aggregated = [];
-if (!empty($employees)) {
-    $ids = array_column($employees, 'id');
-    $placeholders = implode(',', array_fill(0, count($ids), '?'));
-    $stmt = $pdo->prepare("
-        SELECT user_id, 
-               SUM(calls) as calls,
-               SUM(calls_answered) as calls_answered,
-               SUM(meetings) as meetings,
-               SUM(contracts) as contracts,
-               SUM(registrations) as registrations,
-               SUM(smart_cash) as smart_cash,
-               SUM(pos_systems) as pos_systems,
-               SUM(inn_leads) as inn_leads,
-               SUM(teams) as teams,
-               SUM(turnover) as turnover,
-               COUNT(DISTINCT report_date) as days_worked
-        FROM daily_reports 
-        WHERE user_id IN ($placeholders) AND report_date BETWEEN ? AND ?
-        GROUP BY user_id
-    ");
-    $params = array_merge($ids, [$startDate, $endDate]);
-    $stmt->execute($params);
-    foreach ($stmt->fetchAll() as $row) {
-        $aggregated[$row['user_id']] = $row;
-    }
+$monthStart = date('Y-m-01');
+$monthEnd = date('Y-m-t');
+$daysPassed = (int)date('j');
+$daysLeft = (int)date('t') - $daysPassed;
+
+// Показатели для KPI
+$kpiMetrics = [
+    'calls' => ['name' => 'Звонки', 'icon' => '📞', 'color' => '#00a36c', 'plan_field' => 'plan_calls', 'daily_plan' => 30],
+    'calls_answered' => ['name' => 'Дозвоны', 'icon' => '✅', 'color' => '#1a2c3e', 'plan_field' => 'plan_answered', 'daily_plan' => 15],
+    'meetings' => ['name' => 'Встречи', 'icon' => '📅', 'color' => '#ffc107', 'plan_field' => 'plan_meetings', 'daily_plan' => 3],
+    'contracts' => ['name' => 'Договоры', 'icon' => '📄', 'color' => '#dc3545', 'plan_field' => 'plan_contracts', 'daily_plan' => 2],
+    'registrations' => ['name' => 'Регистрации', 'icon' => '📝', 'color' => '#17a2b8', 'plan_field' => 'plan_registrations', 'daily_plan' => 3],
+    'smart_cash' => ['name' => 'Смарт-кассы', 'icon' => '💳', 'color' => '#6f42c1', 'plan_field' => 'plan_smart_cash', 'daily_plan' => 0.33],
+    'pos_systems' => ['name' => 'ПОС', 'icon' => '🖥️', 'color' => '#fd7e14', 'plan_field' => 'plan_pos_systems', 'daily_plan' => 0.033],
+    'inn_leads' => ['name' => 'ИНН чаевые', 'icon' => '🔗', 'color' => '#20c997', 'plan_field' => 'plan_inn_leads', 'daily_plan' => 2],
+    'teams' => ['name' => 'Команды чаевые', 'icon' => '👥', 'color' => '#e83e8c', 'plan_field' => 'plan_teams', 'daily_plan' => 0.16],
+    'turnover' => ['name' => 'Оборот чаевых', 'icon' => '💰', 'color' => '#00a36c', 'plan_field' => 'plan_turnover', 'daily_plan' => 7333]
+];
+
+// Получаем суммарные данные по команде
+$totalData = [];
+foreach ($kpiMetrics as $key => $m) {
+    $totalData[$key] = 0;
 }
 
-// Планы
-$plans = [];
-$stmt = $pdo->prepare("SELECT user_id, plan_calls, plan_answered, plan_meetings, plan_contracts, plan_registrations, plan_smart_cash, plan_pos_systems, plan_inn_leads, plan_teams, plan_turnover FROM monthly_plans WHERE year = ? AND month = ?");
-$stmt->execute([date('Y'), date('m')]);
-foreach ($stmt->fetchAll() as $p) {
-    $plans[$p['user_id']] = $p;
+$stmt = $pdo->prepare("
+    SELECT SUM(calls) as calls, SUM(calls_answered) as calls_answered,
+           SUM(meetings) as meetings, SUM(contracts) as contracts,
+           SUM(registrations) as registrations, SUM(smart_cash) as smart_cash,
+           SUM(pos_systems) as pos_systems, SUM(inn_leads) as inn_leads,
+           SUM(teams) as teams, SUM(turnover) as turnover
+    FROM daily_reports 
+    WHERE user_id IN ($placeholders) AND report_date BETWEEN ? AND ?
+");
+$stmt->execute(array_merge($employeeIds, [$monthStart, $monthEnd]));
+$row = $stmt->fetch();
+foreach ($kpiMetrics as $key => $m) {
+    $totalData[$key] = $row[$key] ?? 0;
 }
 
-// Данные для графика
-if (!empty($employees)) {
-    $ids = array_column($employees, 'id');
-    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+// Получаем планы команды
+$teamPlans = [];
+$stmt = $pdo->prepare("
+    SELECT SUM(plan_calls) as plan_calls, SUM(plan_answered) as plan_answered,
+           SUM(plan_meetings) as plan_meetings, SUM(plan_contracts) as plan_contracts,
+           SUM(plan_registrations) as plan_registrations, SUM(plan_smart_cash) as plan_smart_cash,
+           SUM(plan_pos_systems) as plan_pos_systems, SUM(plan_inn_leads) as plan_inn_leads,
+           SUM(plan_teams) as plan_teams, SUM(plan_turnover) as plan_turnover
+    FROM monthly_plans WHERE user_id IN ($placeholders) AND year = ? AND month = ?
+");
+$stmt->execute(array_merge($employeeIds, [date('Y'), date('m')]));
+$teamPlans = $stmt->fetch();
+
+// Прогнозы
+$forecasts = [];
+foreach ($kpiMetrics as $key => $m) {
+    $plan = $teamPlans["plan_$key"] ?? ($m['daily_plan'] * 30);
+    $fact = $totalData[$key];
+    $forecast = $daysPassed > 0 ? round($fact + ($fact / $daysPassed) * $daysLeft) : $fact;
+    $deviation = $plan - $forecast;
+    $neededPerDay = $daysLeft > 0 ? max(0, round(($plan - $fact) / $daysLeft)) : 0;
+    $progress = $plan > 0 ? min(100, round(($fact / $plan) * 100)) : 0;
+    $forecasts[$key] = [
+        'plan' => $plan, 'fact' => $fact, 'forecast' => $forecast,
+        'deviation' => $deviation, 'needed_per_day' => $neededPerDay,
+        'progress' => $progress, 'unit' => $m['name'] == 'Оборот чаевых' ? '₽' : 'шт',
+        'status' => $progress >= 100 ? 'success' : ($progress >= 70 ? 'warning' : 'danger')
+    ];
+}
+
+// Данные сотрудников для таблицы
+$employeeData = [];
+foreach ($employees as $emp) {
     $stmt = $pdo->prepare("
-        SELECT report_date, SUM(contracts) as total_contracts
+        SELECT SUM(contracts) as contracts, SUM(calls) as calls,
+               SUM(meetings) as meetings, SUM(turnover) as turnover
         FROM daily_reports 
-        WHERE user_id IN ($placeholders) AND report_date BETWEEN ? AND ?
-        GROUP BY report_date
-        ORDER BY report_date
+        WHERE user_id = ? AND report_date BETWEEN ? AND ?
     ");
-    $stmt->execute(array_merge($ids, [$startDate, $endDate]));
-    $dailyContracts = $stmt->fetchAll();
-} else {
-    $dailyContracts = [];
+    $stmt->execute([$emp['id'], $monthStart, $monthEnd]);
+    $empData = $stmt->fetch();
+    
+    $stmt = $pdo->prepare("SELECT plan_contracts FROM monthly_plans WHERE user_id = ? AND year = ? AND month = ?");
+    $stmt->execute([$emp['id'], date('Y'), date('m')]);
+    $empPlan = $stmt->fetch()['plan_contracts'] ?? 30;
+    
+    $employeeData[] = [
+        'name' => $emp['full_name'],
+        'tabel' => $emp['tabel_number'],
+        'calls' => $empData['calls'] ?? 0,
+        'meetings' => $empData['meetings'] ?? 0,
+        'contracts' => $empData['contracts'] ?? 0,
+        'turnover' => $empData['turnover'] ?? 0,
+        'plan' => $empPlan,
+        'percent' => $empPlan > 0 ? min(100, round((($empData['contracts'] ?? 0) / $empPlan) * 100)) : 0
+    ];
 }
 ?>
 <!DOCTYPE html>
@@ -83,7 +125,6 @@ if (!empty($employees)) {
 <head>
     <title>Sales CRM - Команда</title>
     <meta charset="utf-8">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; }
@@ -92,25 +133,25 @@ if (!empty($employees)) {
         .nav { display: flex; gap: 15px; flex-wrap: wrap; }
         .nav a, .logout { color: white; text-decoration: none; padding: 8px 16px; border-radius: 8px; background: #00a36c; }
         .container { max-width: 1400px; margin: 0 auto; padding: 30px 20px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .stat-card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .stat-card h3 { font-size: 14px; color: #666; margin-bottom: 10px; border-left: 3px solid; padding-left: 10px; }
+        .stat-card .value { font-size: 28px; font-weight: bold; }
+        .stat-card .plan { font-size: 12px; color: #999; margin-top: 5px; }
+        .stat-card .progress-bar { width: 100%; background: #eee; border-radius: 10px; overflow: hidden; height: 8px; margin-top: 10px; }
+        .stat-card .progress-fill { height: 8px; }
+        .forecast-warning { color: #dc3545; font-weight: bold; }
+        .forecast-success { color: #00a36c; }
         .card { background: white; border-radius: 12px; padding: 20px; margin-bottom: 30px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .stat-card { background: white; border-radius: 12px; padding: 20px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-        .stat-card h3 { font-size: 14px; color: #666; margin-bottom: 10px; }
-        .stat-card .value { font-size: 28px; font-weight: bold; color: #00a36c; }
-        select { padding: 8px; border-radius: 8px; border: 1px solid #ddd; margin-bottom: 15px; }
-        table { width: 100%; border-collapse: collapse; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
         th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; }
-        th { background: #f8f9fa; position: sticky; top: 0; }
+        th { background: #f8f9fa; }
         .badge { padding: 4px 8px; border-radius: 20px; font-size: 11px; display: inline-block; }
         .badge.success { background: #d4edda; color: #155724; }
         .badge.warning { background: #fff3cd; color: #856404; }
         .badge.danger { background: #f8d7da; color: #721c24; }
-        .progress-bar { width: 100%; background: #eee; border-radius: 10px; overflow: hidden; height: 8px; }
-        .progress-fill { background: #00a36c; height: 8px; }
-        .progress-fill.warning { background: #ffc107; }
-        .progress-fill.danger { background: #dc3545; }
-        .scroll-table { overflow-x: auto; max-height: 500px; overflow-y: auto; }
-        .filters { display: flex; gap: 15px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+        .progress-bar-table { width: 80px; background: #eee; border-radius: 10px; overflow: hidden; display: inline-block; height: 6px; margin-left: 5px; }
+        .progress-fill-table { background: #00a36c; height: 6px; }
         @media (max-width: 768px) { .stats-grid { grid-template-columns: 1fr; } }
     </style>
 </head>
@@ -131,91 +172,58 @@ if (!empty($employees)) {
         </div>
     </div>
     <div class="container">
-        <div class="filters">
-            <label>📅 Период:</label>
-            <select onchange="location.href='?days='+this.value">
-                <option value="30" <?= $showDays == 30 ? 'selected' : '' ?>>Последний месяц</option>
-                <option value="60" <?= $showDays == 60 ? 'selected' : '' ?>>Последние 2 месяца</option>
-                <option value="90" <?= $showDays == 90 ? 'selected' : '' ?>>Последние 3 месяца</option>
-            </select>
-        </div>
-        
+        <!-- KPI карточки -->
         <div class="stats-grid">
-            <?php 
-            $totals = ['calls'=>0, 'contracts'=>0, 'meetings'=>0, 'turnover'=>0, 'days_worked'=>0];
-            foreach ($employees as $emp) {
-                $agg = $aggregated[$emp['id']] ?? ['calls'=>0, 'contracts'=>0, 'meetings'=>0, 'turnover'=>0, 'days_worked'=>0];
-                $totals['calls'] += $agg['calls'];
-                $totals['contracts'] += $agg['contracts'];
-                $totals['meetings'] += $agg['meetings'];
-                $totals['turnover'] += $agg['turnover'];
-                $totals['days_worked'] += $agg['days_worked'];
-            }
+            <?php foreach ($kpiMetrics as $key => $m): 
+                $f = $forecasts[$key];
+                $statusColor = $f['status'] == 'success' ? '#00a36c' : ($f['status'] == 'warning' ? '#ffc107' : '#dc3545');
+                $unit = $f['unit'];
             ?>
-            <div class="stat-card"><h3>📞 Звонков (всего)</h3><div class="value"><?= $totals['calls'] ?></div></div>
-            <div class="stat-card"><h3>📄 Договоров (всего)</h3><div class="value"><?= $totals['contracts'] ?></div></div>
-            <div class="stat-card"><h3>📅 Встреч (всего)</h3><div class="value"><?= $totals['meetings'] ?></div></div>
-            <div class="stat-card"><h3>💰 Оборот (всего)</h3><div class="value"><?= number_format($totals['turnover'], 0, ',', ' ') ?> ₽</div></div>
+            <div class="stat-card">
+                <h3 style="border-left-color: <?= $m['color'] ?>"><?= $m['icon'] ?> <?= $m['name'] ?></h3>
+                <div class="value" style="color: <?= $statusColor ?>"><?= number_format($f['fact']) ?> <?= $unit ?></div>
+                <div class="plan">План: <?= number_format($f['plan']) ?> <?= $unit ?></div>
+                <div class="progress-bar"><div class="progress-fill" style="width: <?= $f['progress'] ?>%; background: <?= $statusColor ?>"></div></div>
+                <div class="forecast-<?= $f['deviation'] > 0 ? 'warning' : 'success' ?>" style="margin-top:10px; font-size:12px;">
+                    📈 Прогноз: <?= number_format($f['forecast']) ?> <?= $unit ?>
+                    <?php if ($f['deviation'] > 0): ?>
+                    <br>⚠️ Нужно в день: <strong><?= $f['needed_per_day'] ?></strong> <?= $unit ?>
+                    <?php elseif ($f['deviation'] < 0): ?>
+                    <br>✅ Перевыполнение
+                    <?php endif; ?>
+                </div>
+            </div>
+            <?php endforeach; ?>
         </div>
         
+        <!-- Таблица сотрудников -->
         <div class="card">
-            <h3>📈 Динамика договоров по дням</h3>
-            <canvas id="contractsChart" style="max-height: 300px;"></canvas>
-        </div>
-        
-        <div class="card">
-            <h3>👥 Детальная статистика команды (все 10 показателей)</h3>
-            <div class="scroll-table">
+            <h3>👥 Детальная статистика сотрудников</h3>
+            <div style="overflow-x: auto;">
                 <table>
                     <thead>
                         <tr>
                             <th>Сотрудник</th>
                             <th>📞 Звонки</th>
-                            <th>✅ Дозвоны</th>
                             <th>📅 Встречи</th>
                             <th>📄 Договоры</th>
-                            <th>📝 Регистрации</th>
-                            <th>💳 Смарт-кассы</th>
-                            <th>🖥️ ПОС</th>
-                            <th>🔗 ИНН чаевые</th>
-                            <th>👥 Команды чаевые</th>
                             <th>💰 Оборот</th>
-                            <th>Дней</th>
+                            <th>План</th>
                             <th>Выполнение</th>
                          </tr>
                     </thead>
                     <tbody>
-                        <?php foreach ($employees as $emp): 
-                            $agg = $aggregated[$emp['id']] ?? [
-                                'calls'=>0, 'calls_answered'=>0, 'meetings'=>0, 'contracts'=>0,
-                                'registrations'=>0, 'smart_cash'=>0, 'pos_systems'=>0,
-                                'inn_leads'=>0, 'teams'=>0, 'turnover'=>0, 'days_worked'=>0
-                            ];
-                            $plan = $plans[$emp['id']] ?? null;
-                            if ($plan && $plan['plan_contracts'] > 0) {
-                                $contractsProgress = min(100, round(($agg['contracts'] / $plan['plan_contracts']) * 100));
-                            } else {
-                                $contractsProgress = $agg['contracts'] > 0 ? 100 : 0;
-                            }
-                            $statusClass = $contractsProgress >= 80 ? 'success' : ($contractsProgress >= 60 ? 'warning' : 'danger');
-                            $statusText = $contractsProgress >= 100 ? 'Перевыполнение' : ($contractsProgress >= 80 ? 'Хорошо' : ($contractsProgress >= 60 ? 'Средне' : 'Отставание'));
-                        ?>
+                        <?php foreach ($employeeData as $emp): ?>
                         <tr>
-                            <td><strong><?= htmlspecialchars($emp['full_name']) ?></strong><br><span style="font-size:10px;color:#999;">таб. <?= $emp['tabel_number'] ?></span></td>
-                            <td><?= $agg['calls'] ?></td>
-                            <td><?= $agg['calls_answered'] ?></td>
-                            <td><?= $agg['meetings'] ?></td>
-                            <td><strong><?= $agg['contracts'] ?></strong></td>
-                            <td><?= $agg['registrations'] ?></td>
-                            <td><?= $agg['smart_cash'] ?></td>
-                            <td><?= $agg['pos_systems'] ?></td>
-                            <td><?= $agg['inn_leads'] ?></td>
-                            <td><?= $agg['teams'] ?></td>
-                            <td><?= number_format($agg['turnover'], 0, ',', ' ') ?> ₽</td>
-                            <td><?= $agg['days_worked'] ?></td>
+                            <td><strong><?= htmlspecialchars($emp['name']) ?></strong><br><span style="font-size:10px;color:#999;">таб. <?= $emp['tabel'] ?></span></td>
+                            <td><?= number_format($emp['calls']) ?></td>
+                            <td><?= number_format($emp['meetings']) ?></td>
+                            <td><strong><?= number_format($emp['contracts']) ?></strong></td>
+                            <td><?= number_format($emp['turnover'], 0, ',', ' ') ?> ₽</td>
+                            <td><?= $emp['plan'] ?></td>
                             <td>
-                                <div class="progress-bar"><div class="progress-fill <?= $statusClass ?>" style="width: <?= $contractsProgress ?>%"></div></div>
-                                <span class="badge <?= $statusClass ?>" style="margin-top:5px;"><?= $statusText ?> (<?= $contractsProgress ?>%)</span>
+                                <span class="badge <?= $emp['percent'] >= 80 ? 'success' : ($emp['percent'] >= 60 ? 'warning' : 'danger') ?>"><?= $emp['percent'] ?>%</span>
+                                <div class="progress-bar-table"><div class="progress-fill-table" style="width: <?= $emp['percent'] ?>%"></div></div>
                             </td>
                         </tr>
                         <?php endforeach; ?>
@@ -224,15 +232,5 @@ if (!empty($employees)) {
             </div>
         </div>
     </div>
-    <script>
-        const dates = <?= json_encode(array_column($dailyContracts, 'report_date')) ?>;
-        const contracts = <?= json_encode(array_column($dailyContracts, 'total_contracts')) ?>;
-        const ctx = document.getElementById('contractsChart').getContext('2d');
-        new Chart(ctx, {
-            type: 'line',
-            data: { labels: dates, datasets: [{ label: 'Договоры', data: contracts, borderColor: '#00a36c', backgroundColor: 'rgba(0, 163, 108, 0.1)', fill: true, tension: 0.4 }] },
-            options: { responsive: true, maintainAspectRatio: true, plugins: { legend: { position: 'top' } } }
-        });
-    </script>
 </body>
 </html>

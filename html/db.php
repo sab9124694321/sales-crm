@@ -1,51 +1,55 @@
 <?php
-$db_file = __DIR__ . '/sales.db';
-$pdo = new PDO("sqlite:$db_file");
-$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-
-// Создание таблиц
-$pdo->exec("
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tabel_number TEXT UNIQUE,
-    full_name TEXT,
-    phone TEXT,
-    role TEXT DEFAULT 'employee',
-    manager_id INTEGER,
-    password TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS monthly_plans (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    year INTEGER,
-    month INTEGER,
-    plan_contracts INTEGER DEFAULT 30
-);
-
-CREATE TABLE IF NOT EXISTS daily_reports (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    report_date DATE DEFAULT CURRENT_DATE,
-    calls INTEGER DEFAULT 0,
-    calls_answered INTEGER DEFAULT 0,
-    meetings INTEGER DEFAULT 0,
-    contracts INTEGER DEFAULT 0,
-    registrations INTEGER DEFAULT 0,
-    smart_cash INTEGER DEFAULT 0,
-    pos_systems INTEGER DEFAULT 0,
-    inn_leads INTEGER DEFAULT 0,
-    teams INTEGER DEFAULT 0,
-    turnover REAL DEFAULT 0
-);
-");
-
-// Создание администратора по умолчанию
-$stmt = $pdo->prepare("SELECT COUNT(*) FROM users WHERE role = 'admin'");
-$stmt->execute();
-if ($stmt->fetchColumn() == 0) {
-    $password = password_hash('admin123', PASSWORD_DEFAULT);
-    $pdo->prepare("INSERT INTO users (tabel_number, full_name, phone, role, password) VALUES ('0001', 'Администратор', '+70000000000', 'admin', ?)")->execute([$password]);
+// Подключение к SQLite базе данных
+try {
+    $db_path = __DIR__ . '/sales.db';
+    $pdo = new PDO("sqlite:" . $db_path);
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+} catch (PDOException $e) {
+    error_log("Database connection error: " . $e->getMessage());
+    die("Database connection error. Please check logs.");
 }
+
+// Функция для проверки и добавления колонок
+function ensureColumns($pdo) {
+    // Проверяем наличие колонок в users
+    $stmt = $pdo->query("PRAGMA table_info(users)");
+    $columns = $stmt->fetchAll(PDO::FETCH_COLUMN, 1);
+    
+    if (!in_array('rank', $columns)) {
+        $pdo->exec("ALTER TABLE users ADD COLUMN rank TEXT DEFAULT 'Новичок'");
+    }
+    if (!in_array('total_points', $columns)) {
+        $pdo->exec("ALTER TABLE users ADD COLUMN total_points INTEGER DEFAULT 0");
+    }
+    
+    // Создаём таблицы если их нет
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS game_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            type TEXT,
+            message TEXT,
+            is_read INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ");
+    
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS rank_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            old_rank TEXT,
+            new_rank TEXT,
+            reason TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ");
+    
+    // Устанавливаем значения по умолчанию
+    $pdo->exec("UPDATE users SET rank = 'Новичок', total_points = 0 WHERE rank IS NULL");
+}
+
+// Вызываем проверку
+ensureColumns($pdo);
 ?>

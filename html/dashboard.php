@@ -152,6 +152,7 @@ $reports_list = $stmt->fetchAll();
 <div class="container">
     
     <?php require_once 'gamification_widget.php'; ?>
+<?php require_once "ai_widget.php"; ?>
     
     <div class="grid">
         <div class="card">

@@ -212,7 +212,7 @@ foreach ($territories as $terr) {
                             <th>📞 Звонки</th>
                             <th>📅 Встречи</th>
                             <th>📄 Договоры</th>
-                            <th>💰 Оборот</th>
+                            <th>💰 оборот по чаевым</th>
                             <th>Прогноз</th>
                             <th>Выполнение</th>
                             <?php if ($role == 'admin'): ?>

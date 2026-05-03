@@ -68,6 +68,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
         <a href="team.php" class="<?= $current_page == 'team.php' ? 'active' : '' ?>">👥 Команда</a>
         <a href="region_manager.php" class="<?= $current_page == 'region_manager.php' ? 'active' : '' ?>">🌍 Регионы</a>
         <a href="ai_dashboard.php" class="<?= $current_page == 'ai_dashboard.php' ? 'active' : '' ?>">🤖 ИИ-дашборд</a>
+        <a href="export_inn.php">📊 Выгрузка ИНН</a>
     </div>
     <div style="display: flex; align-items: center; gap: 15px;">
         <span class="user-info">👤 <?= htmlspecialchars($_SESSION['name']) ?> (<?= $role == 'admin' ? 'Администратор' : ($role == 'manager' ? 'Менеджер' : 'Сотрудник') ?>)</span>

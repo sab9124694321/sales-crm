@@ -15,24 +15,31 @@ $stmt = $pdo->prepare("SELECT tabel_number, full_name, manager_id FROM users WHE
 $stmt->execute([$user_id]);
 $user = $stmt->fetch();
 
-if (!$user['tabel_number']) {
-    die("Ошибка: у сотрудника не указан табельный номер");
-}
-
 // Текущий месяц
 $current_month = date('Y-m');
 $days_in_month = date('t');
 $current_day = date('j');
-$days_passed = $days_in_month - $days_in_month + $current_day - 1; // дни прошло
-$days_remaining = $days_in_month - $current_day + 1;
+$days_passed = max(1, $current_day);
+$days_remaining = max(1, $days_in_month - $current_day + 1);
 
-// Получаем МЕСЯЧНЫЕ планы из таблицы plans
+// Получаем планы сотрудника
 $stmt = $pdo->prepare("SELECT * FROM plans WHERE tabel_number = ?");
 $stmt->execute([$user['tabel_number']]);
 $plans = $stmt->fetch();
 
 if (!$plans) {
-    die("Ошибка: не найдены планы для сотрудника. Обратитесь к администратору.");
+    $plans = [
+        'calls_plan' => 350,
+        'calls_answered_plan' => 245,
+        'meetings_plan' => 35,
+        'contracts_plan' => 21,
+        'registrations_plan' => 15,
+        'smart_cash_plan' => 10,
+        'pos_systems_plan' => 5,
+        'inn_leads_plan' => 5,
+        'teams_plan' => 3,
+        'turnover_plan' => 1500000
+    ];
 }
 
 // Получаем факт за текущий месяц
@@ -59,16 +66,16 @@ foreach ($fact as $key => $value) {
 }
 
 $metrics = [
-    'calls' => ['name' => '📞 Звонки', 'plan_month' => $plans['calls_plan'], 'fact' => $fact['calls_fact']],
-    'calls_answered' => ['name' => '✅ Дозвоны', 'plan_month' => $plans['calls_answered_plan'], 'fact' => $fact['calls_answered_fact']],
-    'meetings' => ['name' => '🤝 Встречи', 'plan_month' => $plans['meetings_plan'], 'fact' => $fact['meetings_fact']],
-    'contracts' => ['name' => '📄 Договоры', 'plan_month' => $plans['contracts_plan'], 'fact' => $fact['contracts_fact']],
-    'registrations' => ['name' => '📝 Регистрации', 'plan_month' => $plans['registrations_plan'], 'fact' => $fact['registrations_fact']],
-    'smart_cash' => ['name' => '💳 smart-кассы', 'plan_month' => $plans['smart_cash_plan'], 'fact' => $fact['smart_cash_fact']],
-    'pos_systems' => ['name' => '🖥️ POS-системы', 'plan_month' => $plans['pos_systems_plan'], 'fact' => $fact['pos_systems_fact']],
-    'inn_leads' => ['name' => '📊 инн по чаевым', 'plan_month' => $plans['inn_leads_plan'], 'fact' => $fact['inn_leads_fact']],
-    'teams' => ['name' => '👥 новые команды по чаевым', 'plan_month' => $plans['teams_plan'], 'fact' => $fact['teams_fact']],
-    'turnover' => ['name' => '💰 новый оборот по чаевым', 'plan_month' => $plans['turnover_plan'], 'fact' => $fact['turnover_fact'], 'is_money' => true]
+    'calls' => ['name' => '📞 Звонки', 'plan' => $plans['calls_plan'], 'fact' => $fact['calls_fact']],
+    'calls_answered' => ['name' => '✅ Дозвоны', 'plan' => $plans['calls_answered_plan'], 'fact' => $fact['calls_answered_fact']],
+    'meetings' => ['name' => '🤝 Встречи', 'plan' => $plans['meetings_plan'], 'fact' => $fact['meetings_fact']],
+    'contracts' => ['name' => '📄 Договоры', 'plan' => $plans['contracts_plan'], 'fact' => $fact['contracts_fact']],
+    'registrations' => ['name' => '📝 Регистрации', 'plan' => $plans['registrations_plan'], 'fact' => $fact['registrations_fact']],
+    'smart_cash' => ['name' => '💳 smart-кассы', 'plan' => $plans['smart_cash_plan'], 'fact' => $fact['smart_cash_fact']],
+    'pos_systems' => ['name' => '🖥️ POS-системы', 'plan' => $plans['pos_systems_plan'], 'fact' => $fact['pos_systems_fact']],
+    'inn_leads' => ['name' => '📊 инн по чаевым', 'plan' => $plans['inn_leads_plan'], 'fact' => $fact['inn_leads_fact']],
+    'teams' => ['name' => '👥 новые команды по чаевым', 'plan' => $plans['teams_plan'], 'fact' => $fact['teams_fact']],
+    'turnover' => ['name' => '💰 новый оборот по чаевым', 'plan' => $plans['turnover_plan'], 'fact' => $fact['turnover_fact'], 'is_money' => true]
 ];
 
 $forecast = [];
@@ -76,24 +83,16 @@ $daily_goal = [];
 $status = [];
 $progress = [];
 $color = [];
-$behind = [];
 
 foreach ($metrics as $key => &$m) {
-    $plan_month = (int)$m['plan_month'];
+    $plan_month = (int)$m['plan'];
     $factVal = (int)$m['fact'];
     
-    // Прогресс %
     $progress[$key] = $plan_month > 0 ? min(100, round(($factVal / $plan_month) * 100)) : 0;
     
-    // Дневная норма для выполнения плана
     $daily_required = ceil($plan_month / $days_in_month);
-    
-    // Сколько должно быть по графику на сегодня
-    $should_be = $daily_required * $days_passed;
-    
-    // Отставание
+    $should_be = $daily_required * ($days_passed - 1);
     $deviation = $should_be - $factVal;
-    $behind[$key] = $deviation > 0;
     
     if ($deviation > 0 && $days_remaining > 0) {
         $extra = ceil($deviation / $days_remaining);
@@ -102,16 +101,14 @@ foreach ($metrics as $key => &$m) {
         $daily_goal[$key] = $daily_required;
     }
     
-    // Прогноз
-    if ($days_passed > 0) {
-        $daily_avg = $factVal / $days_passed;
+    if ($days_passed > 1) {
+        $daily_avg = $factVal / ($days_passed - 1);
         $forecast_val = $factVal + ($daily_avg * $days_remaining);
     } else {
         $forecast_val = $plan_month;
     }
     $forecast[$key] = round($forecast_val);
     
-    // Статус
     if ($forecast_val >= $plan_month) {
         $status[$key] = '🚀 Будет выполнено';
         $color[$key] = '#00a36c';
@@ -122,21 +119,11 @@ foreach ($metrics as $key => &$m) {
         $status[$key] = '🔴 Провал';
         $color[$key] = '#ef4444';
     }
-    
-    $m['daily_required'] = $daily_required;
-    $m['daily_goal'] = $daily_goal[$key];
-    $m['behind'] = $behind[$key];
-    $m['deviation'] = $deviation;
-    $m['forecast'] = $forecast[$key];
-    $m['progress'] = $progress[$key];
-    $m['status'] = $status[$key];
-    $m['color'] = $color[$key];
 }
 
-// Обработка сохранения отчёта (без ON CONFLICT)
+// Обработка отчётов
 $editReport = null;
 $editDate = null;
-
 if (isset($_GET['edit'])) {
     $editDate = $_GET['edit'];
     $stmt = $pdo->prepare("SELECT * FROM daily_reports WHERE user_id = ? AND report_date = ?");
@@ -157,33 +144,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_report'])) {
     $teams = (int)$_POST['teams'];
     $turnover = (int)$_POST['turnover'];
     
-    // Проверяем, есть ли уже отчёт за эту дату
     $check = $pdo->prepare("SELECT id FROM daily_reports WHERE user_id = ? AND report_date = ?");
     $check->execute([$user_id, $report_date]);
     
     if ($check->fetch()) {
-        // Обновляем
-        $stmt = $pdo->prepare("
-            UPDATE daily_reports SET 
-                calls = ?, calls_answered = ?, meetings = ?, contracts = ?, registrations = ?,
-                smart_cash = ?, pos_systems = ?, inn_leads = ?, teams = ?, turnover = ?
-            WHERE user_id = ? AND report_date = ?
-        ");
+        $stmt = $pdo->prepare("UPDATE daily_reports SET 
+            calls = ?, calls_answered = ?, meetings = ?, contracts = ?, registrations = ?,
+            smart_cash = ?, pos_systems = ?, inn_leads = ?, teams = ?, turnover = ?
+            WHERE user_id = ? AND report_date = ?");
         $stmt->execute([$calls, $calls_answered, $meetings, $contracts, $registrations,
                         $smart_cash, $pos_systems, $inn_leads, $teams, $turnover,
                         $user_id, $report_date]);
     } else {
-        // Вставляем
-        $stmt = $pdo->prepare("
-            INSERT INTO daily_reports 
+        $stmt = $pdo->prepare("INSERT INTO daily_reports 
             (user_id, report_date, calls, calls_answered, meetings, contracts, registrations,
              smart_cash, pos_systems, inn_leads, teams, turnover)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ");
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         $stmt->execute([$user_id, $report_date, $calls, $calls_answered, $meetings, $contracts, 
                         $registrations, $smart_cash, $pos_systems, $inn_leads, $teams, $turnover]);
     }
-    
     header('Location: dashboard.php?saved=1');
     exit;
 }
@@ -195,7 +174,6 @@ if (isset($_GET['delete'])) {
     exit;
 }
 
-// История отчётов
 $stmt = $pdo->prepare("
     SELECT * FROM daily_reports 
     WHERE user_id = ? AND strftime('%Y-%m', report_date) = ?
@@ -210,10 +188,9 @@ $history = $stmt->fetchAll();
 <head>
     <title>Дашборд сотрудника - Sales CRM</title>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: system-ui, -apple-system, sans-serif; background: #f5f7fb; padding: 20px; }
+        body { font-family: system-ui, sans-serif; background: #f5f7fb; padding: 20px; }
         .container { max-width: 1400px; margin: 0 auto; }
         h1 { color: #00a36c; margin-bottom: 10px; }
         .subtitle { color: #666; margin-bottom: 20px; }
@@ -233,14 +210,13 @@ $history = $stmt->fetchAll();
         .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 20px; }
         .form-group label { display: block; font-size: 12px; color: #666; margin-bottom: 5px; }
         .form-group input { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 8px; }
-        button { background: #00a36c; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+        button { background: #00a36c; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; }
         .history-table { width: 100%; border-collapse: collapse; }
         .history-table th, .history-table td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; font-size: 13px; }
         .history-table th { background: #f8f9fa; }
         .edit-btn { background: #f59e0b; padding: 4px 8px; border-radius: 6px; text-decoration: none; color: white; font-size: 11px; }
         .delete-btn { background: #ef4444; padding: 4px 8px; border-radius: 6px; text-decoration: none; color: white; font-size: 11px; }
         .success-message { background: #d4edda; color: #155724; padding: 12px; border-radius: 8px; margin-bottom: 20px; }
-        .note { font-size: 11px; color: #888; margin-top: 10px; text-align: center; }
     </style>
 </head>
 <body>
@@ -261,25 +237,17 @@ $history = $stmt->fetchAll();
     
     <div class="stats-grid">
         <?php foreach ($metrics as $key => $m): ?>
-        <div class="stat-card" style="border-left-color: <?= $m['color'] ?>">
+        <div class="stat-card" style="border-left-color: <?= $color[$key] ?>">
             <h3><?= $m['name'] ?></h3>
-            <div class="fact">
-                <?= isset($m['is_money']) ? number_format($m['fact'], 0, ',', ' ') . ' ₽' : $m['fact'] ?>
+            <div class="fact"><?= isset($m['is_money']) ? number_format($m['fact'], 0, ',', ' ') . ' ₽' : $m['fact'] ?></div>
+            <div class="plan-month">📋 План на месяц: <?= isset($m['is_money']) ? number_format($m['plan'], 0, ',', ' ') . ' ₽' : $m['plan'] ?></div>
+            <div class="progress-bar"><div class="progress-fill" style="width: <?= $progress[$key] ?>%"></div></div>
+            <div class="forecast">📈 Прогноз на месяц: <?= isset($m['is_money']) ? number_format($forecast[$key], 0, ',', ' ') . ' ₽' : $forecast[$key] ?>
+                <span class="status-badge" style="background: <?= $color[$key] ?>20; color: <?= $color[$key] ?>"><?= $status[$key] ?></span>
             </div>
-            <div class="plan-month">
-                📋 План на месяц: <?= isset($m['is_money']) ? number_format($m['plan_month'], 0, ',', ' ') . ' ₽' : $m['plan_month'] ?>
-                <span class="status-badge" style="background: <?= $m['color'] ?>20; color: <?= $m['color'] ?>"><?= $m['status'] ?></span>
-            </div>
-            <div class="progress-bar"><div class="progress-fill" style="width: <?= $m['progress'] ?>%"></div></div>
-            <div class="forecast">
-                📈 Прогноз на месяц: <?= isset($m['is_money']) ? number_format($m['forecast'], 0, ',', ' ') . ' ₽' : $m['forecast'] ?>
-            </div>
-            <div class="daily-goal <?= $m['behind'] ? 'daily-goal-warning' : '' ?>">
-                🎯 Норма на сегодня: <strong><?= isset($m['is_money']) ? number_format($m['daily_goal'], 0, ',', ' ') . ' ₽' : $m['daily_goal'] ?></strong>
-                <span style="font-size: 10px;">(идеально: <?= $m['daily_required'] ?> в день, осталось <?= $days_remaining ?> дней)</span>
-                <?php if ($m['behind']): ?>
-                    <br><span style="font-size: 10px;">⚠️ Вы отстаёте на <?= abs($m['deviation']) ?> ед.</span>
-                <?php endif; ?>
+            <div class="daily-goal <?= $deviation > 0 ? 'daily-goal-warning' : '' ?>">
+                🎯 Норма на сегодня: <strong><?= isset($m['is_money']) ? number_format($daily_goal[$key], 0, ',', ' ') . ' ₽' : $daily_goal[$key] ?></strong>
+                <span style="font-size: 10px;">(осталось <?= $days_remaining ?> дней)</span>
             </div>
             <div class="month-info">📅 <?= $current_day ?>/<?= $days_in_month ?> дней прошло</div>
         </div>
@@ -318,7 +286,7 @@ $history = $stmt->fetchAll();
             <p style="color: #666;">Нет отчётов за текущий месяц</p>
         <?php else: ?>
             <table class="history-table">
-                <thead><tr><th>Дата</th><th>Звонки</th><th>Дозвоны</th><th>Встречи</th><th>Договоры</th><th>Регистрации</th><th>smart-кассы</th><th>инн по чаевым</th><th>команды</th><th>оборот</th><th>Действия</th></tr></thead>
+                <thead><tr><th>Дата</th><th>Звонки</th><th>Дозвоны</th><th>Встречи</th><th>Договоры</th><th>Регистрации</th><th>оборот</th><th>Действия</th></tr></thead>
                 <tbody>
                     <?php foreach ($history as $row): ?>
                     <tr>
@@ -328,9 +296,6 @@ $history = $stmt->fetchAll();
                         <td><?= $row['meetings'] ?></td>
                         <td><?= $row['contracts'] ?></td>
                         <td><?= $row['registrations'] ?></td>
-                        <td><?= $row['smart_cash'] ?></td>
-                        <td><?= $row['inn_leads'] ?></td>
-                        <td><?= $row['teams'] ?></td>
                         <td><?= number_format($row['turnover'], 0, ',', ' ') ?> ₽</td>
                         <td><a href="?edit=<?= $row['report_date'] ?>" class="edit-btn">✏️</a> <a href="?delete=<?= $row['report_date'] ?>" class="delete-btn" onclick="return confirm('Удалить?')">🗑️</a></td>
                     </tr>
@@ -339,7 +304,6 @@ $history = $stmt->fetchAll();
             </table>
         <?php endif; ?>
     </div>
-    <div class="note">💡 План на месяц — это сумма за весь месяц. Норма на сегодня рассчитана с учётом графика и отставания.</div>
 </div>
 </body>
 </html>

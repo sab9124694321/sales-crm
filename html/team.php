@@ -128,8 +128,6 @@ foreach ($employees as $emp) {
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; }
-        .header { background: #1a2c3e; color: white; padding: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
-        .header h1 { color: #00a36c; }
         .nav { display: flex; gap: 15px; flex-wrap: wrap; }
         .nav a, .logout { color: white; text-decoration: none; padding: 8px 16px; border-radius: 8px; background: #00a36c; }
         .container { max-width: 1400px; margin: 0 auto; padding: 30px 20px; }
@@ -156,19 +154,7 @@ foreach ($employees as $emp) {
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>Sales CRM</h1>
-        <div style="display: flex; gap: 20px; align-items: center; flex-wrap: wrap;">
-            <span>👋 <?= htmlspecialchars($name) ?> (<?= htmlspecialchars($role) ?>)</span>
-            <div class="nav">
-                <a href="dashboard.php">📊 Дашборд</a>
-                <a href="team.php">👥 Команда</a>
-                <?php if ($role === 'admin'): ?>
-                <a href="admin.php">⚙️ Админ</a>
-                <?php endif; ?>
-                <a href="region_manager.php">🗺️ Тер. менеджер</a>
-            </div>
-            <a href="logout.php" class="logout">Выйти</a>
+<?php require_once "navbar.php"; ?>
         </div>
     </div>
     <div class="container">

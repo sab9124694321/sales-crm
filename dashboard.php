@@ -435,7 +435,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
     <a href="leads.php">📋 Лиды <?php if ($free_leads_count > 0 && $user_role == 'manager'): ?><span style="background:#ff6b6b; color:#fff; border-radius:10px; padding:0 6px; font-size:0.7rem;"><?= $free_leads_count ?></span><?php endif; ?></a>
     <?php endif; ?>
     <a href="quests.php">Квесты</a>
-    <a href="calls.php">📞 Я звоню</a>
+    <a href="calls.php">📞 Я звоню</a><a href="rop_control.php">🛡️ Контроль</a>
     <a href="ai_dashboard.php">AI</a>
     <?php if ($user_role=='admin'): ?>
         <a href="admin.php">Админ</a>

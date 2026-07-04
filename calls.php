@@ -200,6 +200,7 @@ $competitive = [
         <a href="export_inn.php">ИНН</a>
         <a href="quests.php">Квесты</a>
         <a href="calls.php" class="active">📞 Я звоню</a>
+        <a href="rop_control.php">🛡️ Контроль</a>
         <a href="ai.php">AI</a>
         <span class="user">👤 <?= htmlspecialchars($user_name) ?></span>
         <a href="logout.php" class="logout">Выйти</a>

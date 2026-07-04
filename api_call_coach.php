@@ -1,95 +1,97 @@
 <?php
 session_start();
-header('Content-Type: application/json; charset=utf-8');
-error_reporting(0);
-ini_set('display_errors', 0);
+header('Content-Type: application/json');
+require_once 'db.php';
 
 if (!isset($_SESSION['user_id'])) {
-    echo json_encode(['error' => 'Требуется авторизация']);
+    echo json_encode(['error' => 'Не авторизован']);
     exit;
 }
-
-require_once 'db.php';
-require_once 'config.php';
 
 $input = json_decode(file_get_contents('php://input'), true);
-$text = trim($input['text'] ?? '');
+$mode = $input['mode'] ?? 'analyze_call';
 
-if ($text === '') {
-    echo json_encode(['error' => 'Пустой текст']);
+if ($mode === 'generate_plan') {
+    $task_id = $input['task_id'] ?? '';
+    $product = $input['product'] ?? 'Торговый эквайринг';
+    $history = $input['history'] ?? [];
+
+    // Формируем микроплан на основе истории
+    $plan = "<strong>🎯 Микроплан звонка</strong><br>";
+    $plan .= "<ul>";
+
+    if (empty($history)) {
+        // Первый звонок
+        $plan .= "<li>📞 <strong>Первый контакт</strong> — представьтесь, уточните потребность</li>";
+        $plan .= "<li>💰 Расскажите про $product: комиссия от 1,2%, СБП 0%</li>";
+        $plan .= "<li>❓ Выявите возражения: цена, конкуренты, не нужен сейчас</li>";
+        $plan .= "<li>📅 Назначьте следующий контакт или договоритесь о встрече</li>";
+    } else {
+        // Повторный звонок — анализируем историю
+        $last = $history[0] ?? null;
+        $last_text = $last['comment_text'] ?? '';
+        $last_status = $last['call_result'] ?? '';
+
+        $plan .= "<li>📞 <strong>Повторный контакт</strong> — напомните о предыдущем разговоре</li>";
+
+        if (stripos($last_text, 'думает') !== false || $last_status === 'think') {
+            $plan .= "<li>⏰ Клиент думал — уточните решение, предложите помощь</li>";
+        }
+        if (stripos($last_text, 'кп') !== false || stripos($last_text, 'коммерческое') !== false) {
+            $plan .= "<li>📄 Уточните, получил ли клиент КП, есть ли вопросы</li>";
+        }
+        if (stripos($last_text, 'встреча') !== false || stripos($last_text, 'демо') !== false) {
+            $plan .= "<li>🤝 Подтвердите встречу, уточните время и место</li>";
+        }
+        if (stripos($last_text, 'дорого') !== false || stripos($last_text, 'цена') !== false) {
+            $plan .= "<li>💰 Обсудите тарифы, покажите калькулятор выгоды</li>";
+        }
+        if (stripos($last_text, 'конкурент') !== false || stripos($last_text, 'тинькофф') !== false || stripos($last_text, 'альфа') !== false) {
+            $plan .= "<li>🏦 Отработайте конкурентов: СБП бесплатно, поддержка 24/7</li>";
+        }
+
+        $plan .= "<li>📅 Зафиксируйте договорённости, назначьте следующий шаг</li>";
+    }
+
+    $plan .= "</ul>";
+    $plan .= "<div style='margin-top:8px; font-size:0.8rem; color:#666;'>💡 Совет: запишите разговор, если есть возможность</div>";
+
+    echo json_encode(['response' => $plan]);
     exit;
 }
 
-// Токен GigaChat
-$accessToken = $_SESSION['gigachat_token'] ?? null;
-if (!$accessToken) {
-    $accessToken = getAccessToken();
-    if ($accessToken) {
-        $_SESSION['gigachat_token'] = $accessToken;
-    } else {
-        echo json_encode(['error' => 'Не удалось получить токен GigaChat. Проверьте config.php.']);
-        exit;
+// Режим analyze_call — анализ комментария
+if ($mode === 'analyze_call') {
+    $text = $input['text'] ?? '';
+    $status = $input['status'] ?? '';
+
+    $analysis = [];
+    $lower = mb_strtolower($text);
+
+    // Проверяем наличие ключевых элементов
+    $has_problem = stripos($lower, 'проблема') !== false || stripos($lower, 'беспокоит') !== false;
+    $has_objection = stripos($lower, 'возражение') !== false || stripos($lower, 'дорого') !== false;
+    $has_next_step = stripos($lower, 'договорились') !== false || stripos($lower, 'перезвон') !== false;
+    $has_decision = stripos($lower, 'реш') !== false || stripos($lower, 'директор') !== false;
+
+    if (!$has_problem) $analysis[] = "❌ Не указана проблема клиента";
+    if (!$has_objection) $analysis[] = "⚠️ Не зафиксированы возражения";
+    if (!$has_next_step) $analysis[] = "⚠️ Нет чётких договорённостей";
+    if (!$has_decision) $analysis[] = "⚠️ Не указано, кто принимает решение";
+
+    if (empty($analysis)) {
+        $analysis[] = "✅ Хороший комментарий! Все ключевые элементы на месте.";
     }
+
+    echo json_encode(['response' => implode("<br>", $analysis)]);
+    exit;
 }
 
-$prompt = "Ты — AI-помощник менеджера по продажам эквайринга Сбербанка. Проанализируй текущий телефонный разговор и дай краткую рекомендацию (1-2 предложения): как продолжить разговор, какие фразы-зацепки использовать, чтобы заинтересовать клиента. Обрати внимание на интонацию и скорость речи (если можешь оценить по тексту). Укажи, что менеджер забыл упомянуть из важного. Текст разговора:\n" . $text;
-
-$result = callGigaChatWithLog($prompt, $accessToken);
-echo json_encode($result);
-
-function getAccessToken(): ?string {
-    $authBase64 = GIGACHAT_AUTH;
-    $rquid = sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
-        mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff),
-        mt_rand(0, 0x0fff) | 0x4000, mt_rand(0, 0x3fff) | 0x8000,
-        mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
-    );
-    $ch = curl_init('https://ngw.devices.sberbank.ru:9443/api/v2/oauth');
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query(['scope' => 'GIGACHAT_API_PERS']));
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Authorization: Basic ' . $authBase64,
-        'Content-Type: application/x-www-form-urlencoded',
-        'RqUID: ' . $rquid,
-    ]);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    if ($httpCode === 200) {
-        $json = json_decode($response, true);
-        return $json['access_token'] ?? null;
-    }
-    return null;
+// Режим analyze_answers — анализ ответов на вопросы ИИ
+if ($mode === 'analyze_answers') {
+    $answers = $input['answers'] ?? [];
+    echo json_encode(['response' => '✅ Ответы получены. Продолжайте работу с клиентом.']);
+    exit;
 }
 
-function callGigaChatWithLog(string $prompt, string $accessToken): array {
-    $data = [
-        'model' => 'GigaChat',
-        'messages' => [
-            ['role' => 'user', 'content' => $prompt]
-        ],
-        'temperature' => 1.2,
-        'max_tokens' => 250,
-    ];
-    $ch = curl_init('https://gigachat.devices.sberbank.ru/api/v1/chat/completions');
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Authorization: Bearer ' . $accessToken,
-        'Content-Type: application/json',
-    ]);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    if ($httpCode === 200) {
-        $json = json_decode($response, true);
-        $text = $json['choices'][0]['message']['content'] ?? null;
-        if ($text) {
-            return ['response' => $text];
-        }
-        return ['error' => 'GigaChat не вернул текст ответа', 'raw' => substr($response, 0, 200)];
-    }
-    return ['error' => "HTTP $httpCode", 'raw' => substr($response, 0, 200)];
-}
+echo json_encode(['error' => 'Неизвестный режим']);

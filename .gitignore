@@ -1,0 +1,22 @@
+# Конфиденциальные данные
+config.php
+mailer.php
+bot_settings.php
+
+# База данных
+sales.db
+*.db
+
+# Логи
+*.log
+ocr_debug.log
+
+# Временные файлы
+__pycache__/
+*.pyc
+.DS_Store
+._*
+
+# Бэкапы
+*.backup
+*.tar.gz

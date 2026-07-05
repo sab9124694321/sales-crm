@@ -170,6 +170,76 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
     exit;
 }
 
+// --- Выгрузка CSV задач с комментариями ---
+if (isset($_GET['export']) && $_GET['export'] === 'csv_tasks') {
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="tasks_comments_' . date('Ymd') . '.csv"');
+    $output = fopen('php://output', 'w');
+    fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
+    
+    fputcsv($output, ['Номер задачи', 'Менеджер', 'Статус', 'Комментарий', 'Дата']);
+    
+    $task_sql = "
+        SELECT 
+            c.task_id,
+            u.full_name as manager_name,
+            COALESCE(c.call_result, 'Нет статуса') as status,
+            c.comment_text,
+            c.created_at
+        FROM call_comments c
+        JOIN users u ON c.user_id = u.id
+        WHERE date(c.created_at) BETWEEN ? AND ?
+        ORDER BY c.created_at DESC
+    ";
+    $task_params = [$filter_date_from, $filter_date_to];
+    
+    if ($is_manager) {
+        $task_sql = "
+            SELECT 
+                c.task_id,
+                u.full_name as manager_name,
+                COALESCE(c.call_result, 'Нет статуса') as status,
+                c.comment_text,
+                c.created_at
+            FROM call_comments c
+            JOIN users u ON c.user_id = u.id
+            WHERE c.user_id = ? AND date(c.created_at) BETWEEN ? AND ?
+            ORDER BY c.created_at DESC
+        ";
+        $task_params = [$user_id, $filter_date_from, $filter_date_to];
+    } elseif ($is_head) {
+        $task_sql = "
+            SELECT 
+                c.task_id,
+                u.full_name as manager_name,
+                COALESCE(c.call_result, 'Нет статуса') as status,
+                c.comment_text,
+                c.created_at
+            FROM call_comments c
+            JOIN users u ON c.user_id = u.id
+            WHERE u.manager_id = ? AND date(c.created_at) BETWEEN ? AND ?
+            ORDER BY c.created_at DESC
+        ";
+        $task_params = [$user_id, $filter_date_from, $filter_date_to];
+    }
+    
+    $stmt = $pdo->prepare($task_sql);
+    $stmt->execute($task_params);
+    
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        fputcsv($output, [
+            $row['task_id'],
+            $row['manager_name'],
+            $row['status'],
+            mb_substr($row['comment_text'], 0, 500),
+            $row['created_at']
+        ]);
+    }
+    
+    fclose($output);
+    exit;
+}
+
 // --- Список территорий для фильтра ---
 $stmt = $pdo->query("SELECT DISTINCT name FROM territories WHERE name IS NOT NULL AND name != '' ORDER BY name");
 $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
@@ -260,7 +330,11 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
             </div>
             <div>
                 <label>&nbsp;</label>
-                <a href="?<?= http_build_query(array_merge($_GET, ['export' => 'csv'])) ?>" class="btn-outline">📥 CSV</a>
+                <a href="?<?= http_build_query(array_merge($_GET, ['export' => 'csv'])) ?>" class="btn-outline">📥 Статистика CSV</a>
+            </div>
+            <div>
+                <label>&nbsp;</label>
+                <a href="?<?= http_build_query(array_merge($_GET, ['export' => 'csv_tasks'])) ?>" class="btn-outline">📋 Задачи CSV</a>
             </div>
         </form>
     </div>

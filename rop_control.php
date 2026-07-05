@@ -35,37 +35,37 @@ function getCallPlan($pdo, $tabel_num) {
 function getEmployeeStats($pdo, $emp_id, $emp_tabel, $date_from, $date_to) {
     // План на день
     $daily_plan = getCallPlan($pdo, $emp_tabel);
-    
+
     // Всего задач
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM epk_tasks WHERE user_tabel = ?");
     $stmt->execute([$emp_tabel]);
     $total_tasks = (int)$stmt->fetchColumn();
-    
+
     // Выполнено звонков (из daily_reports)
     $stmt = $pdo->prepare("SELECT COALESCE(SUM(calls),0) FROM daily_reports WHERE user_id = ? AND report_date BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $calls_done = (int)$stmt->fetchColumn();
-    
+
     // На контроле РОП
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND date(created_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $on_control = (int)$stmt->fetchColumn();
-    
+
     // Подтверждено
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND status = 'Подтверждено' AND date(checked_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $confirmed = (int)$stmt->fetchColumn();
-    
+
     // Отклонено
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND status = 'Отклонено' AND date(checked_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $rejected = (int)$stmt->fetchColumn();
-    
+
     // Перепрозвон
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND status = 'Перепрозвон' AND date(checked_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $recall = (int)$stmt->fetchColumn();
-    
+
     return [
         'daily_plan' => $daily_plan,
         'total_tasks' => $total_tasks,
@@ -80,6 +80,7 @@ function getEmployeeStats($pdo, $emp_id, $emp_tabel, $date_from, $date_to) {
 // --- Собираем данные в зависимости от роли ---
 $employees = [];
 $heads = [];
+$territories_data = [];
 
 if ($is_manager) {
     // Сотрудник видит только себя
@@ -94,7 +95,7 @@ if ($is_manager) {
     $stmt = $pdo->prepare("SELECT id, full_name, tabel_number FROM users WHERE is_active = 1 AND role IN ('manager', 'mmb_manager', 'ubr_middle') AND manager_id = ? ORDER BY full_name");
     $stmt->execute([$user_id]);
     $team = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
+
     foreach ($team as $member) {
         $employees[] = [
             'id' => $member['id'],
@@ -104,58 +105,108 @@ if ($is_manager) {
         ];
     }
 } elseif ($is_terman) {
-    // Термен видит руководителей
-    $stmt = $pdo->query("SELECT id, full_name, tabel_number FROM users WHERE is_active = 1 AND role IN ('head', 'territory_head') ORDER BY full_name");
-    $heads_list = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
-    foreach ($heads_list as $head) {
-        // Статистика руководителя
-        $head_stats = getEmployeeStats($pdo, $head['id'], $head['tabel_number'], $filter_date_from, $filter_date_to);
-        
-        // Команда руководителя
-        $stmt = $pdo->prepare("SELECT id, full_name, tabel_number FROM users WHERE is_active = 1 AND role IN ('manager', 'mmb_manager', 'ubr_middle') AND manager_id = ? ORDER BY full_name");
-        $stmt->execute([$head['id']]);
-        $team = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        $team_members = [];
-        foreach ($team as $member) {
-            $team_members[] = [
-                'id' => $member['id'],
-                'tabel' => $member['tabel_number'],
-                'name' => $member['full_name'],
-                'stats' => getEmployeeStats($pdo, $member['id'], $member['tabel_number'], $filter_date_from, $filter_date_to)
+    // Термен видит территории
+    $stmt = $pdo->query("SELECT id, name FROM territories WHERE name IS NOT NULL AND name != '' ORDER BY name");
+    $territories_list = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    foreach ($territories_list as $territory) {
+        // Находим руководителей этой территории
+        $stmt = $pdo->prepare("SELECT id, full_name, tabel_number, territory_id FROM users WHERE is_active = 1 AND role IN ('head', 'territory_head') AND territory_id = ? ORDER BY full_name");
+        $stmt->execute([$territory['id']]);
+        $territory_heads = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $territory_heads_data = [];
+        $territory_totals = ['daily_plan'=>0, 'total_tasks'=>0, 'calls_done'=>0, 'on_control'=>0, 'confirmed'=>0, 'rejected'=>0, 'recall'=>0];
+
+        foreach ($territory_heads as $head) {
+            $head_stats = getEmployeeStats($pdo, $head['id'], $head['tabel_number'], $filter_date_from, $filter_date_to);
+
+            // Команда руководителя
+            $stmt = $pdo->prepare("SELECT id, full_name, tabel_number FROM users WHERE is_active = 1 AND role IN ('manager', 'mmb_manager', 'ubr_middle') AND manager_id = ? ORDER BY full_name");
+            $stmt->execute([$head['id']]);
+            $team = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            $team_members = [];
+            $team_totals = ['daily_plan'=>0, 'total_tasks'=>0, 'calls_done'=>0, 'on_control'=>0, 'confirmed'=>0, 'rejected'=>0, 'recall'=>0];
+
+            foreach ($team as $member) {
+                $member_stats = getEmployeeStats($pdo, $member['id'], $member['tabel_number'], $filter_date_from, $filter_date_to);
+                $team_members[] = [
+                    'id' => $member['id'],
+                    'tabel' => $member['tabel_number'],
+                    'name' => $member['full_name'],
+                    'stats' => $member_stats
+                ];
+                // Суммируем в итоги команды
+                $team_totals['daily_plan'] += $member_stats['daily_plan'];
+                $team_totals['total_tasks'] += $member_stats['total_tasks'];
+                $team_totals['calls_done'] += $member_stats['calls_done'];
+                $team_totals['on_control'] += $member_stats['on_control'];
+                $team_totals['confirmed'] += $member_stats['confirmed'];
+                $team_totals['rejected'] += $member_stats['rejected'];
+                $team_totals['recall'] += $member_stats['recall'];
+            }
+
+            // Суммируем в итоги территории
+            $territory_totals['daily_plan'] += $head_stats['daily_plan'] + $team_totals['daily_plan'];
+            $territory_totals['total_tasks'] += $head_stats['total_tasks'] + $team_totals['total_tasks'];
+            $territory_totals['calls_done'] += $head_stats['calls_done'] + $team_totals['calls_done'];
+            $territory_totals['on_control'] += $head_stats['on_control'] + $team_totals['on_control'];
+            $territory_totals['confirmed'] += $head_stats['confirmed'] + $team_totals['confirmed'];
+            $territory_totals['rejected'] += $head_stats['rejected'] + $team_totals['rejected'];
+            $territory_totals['recall'] += $head_stats['recall'] + $team_totals['recall'];
+
+            $territory_heads_data[] = [
+                'id' => $head['id'],
+                'tabel' => $head['tabel_number'],
+                'name' => $head['full_name'],
+                'stats' => $head_stats,
+                'team' => $team_members,
+                'team_totals' => $team_totals
             ];
         }
-        
-        $heads[] = [
-            'id' => $head['id'],
-            'tabel' => $head['tabel_number'],
-            'name' => $head['full_name'],
-            'stats' => $head_stats,
-            'team' => $team_members
+
+        $territories_data[] = [
+            'id' => $territory['id'],
+            'name' => $territory['name'],
+            'heads' => $territory_heads_data,
+            'totals' => $territory_totals
         ];
     }
 }
 
-// --- Выгрузка CSV ---
+// --- Выгрузка CSV статистики ---
 if (isset($_GET['export']) && $_GET['export'] === 'csv') {
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename="control_stats_' . date('Ymd') . '.csv"');
     $output = fopen('php://output', 'w');
     fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
-    
+
     fputcsv($output, ['Сотрудник', 'Табель', 'План/день', 'Задач всего', 'Звонков', 'На контроле', 'Подтверждено', 'Отклонено', 'Перепрозвон']);
-    
+
     if ($is_terman) {
-        foreach ($heads as $head) {
-            fputcsv($output, ['=== ' . $head['name'] . ' ===', '', '', '', '', '', '', '', '']);
-            foreach ($head['team'] as $emp) {
-                fputcsv($output, [
-                    $emp['name'], $emp['tabel'], $emp['stats']['daily_plan'], $emp['stats']['total_tasks'],
-                    $emp['stats']['calls_done'], $emp['stats']['on_control'], $emp['stats']['confirmed'],
-                    $emp['stats']['rejected'], $emp['stats']['recall']
-                ]);
+        foreach ($territories_data as $territory) {
+            fputcsv($output, ['=== ТЕРРИТОРИЯ: ' . $territory['name'] . ' ===', '', '', '', '', '', '', '', '']);
+            foreach ($territory['heads'] as $head) {
+                fputcsv($output, ['-- ' . $head['name'] . ' --', '', '', '', '', '', '', '', '']);
+                foreach ($head['team'] as $emp) {
+                    fputcsv($output, [
+                        $emp['name'], $emp['tabel'], $emp['stats']['daily_plan'], $emp['stats']['total_tasks'],
+                        $emp['stats']['calls_done'], $emp['stats']['on_control'], $emp['stats']['confirmed'],
+                        $emp['stats']['rejected'], $emp['stats']['recall']
+                    ]);
+                }
+                fputcsv($output, ['ИТОГО КОМАНДЫ', '', $head['team_totals']['daily_plan'], $head['team_totals']['total_tasks'], $head['team_totals']['calls_done'], $head['team_totals']['on_control'], $head['team_totals']['confirmed'], $head['team_totals']['rejected'], $head['team_totals']['recall']]);
             }
+            fputcsv($output, ['ИТОГО ТЕРРИТОРИИ', '', $territory['totals']['daily_plan'], $territory['totals']['total_tasks'], $territory['totals']['calls_done'], $territory['totals']['on_control'], $territory['totals']['confirmed'], $territory['totals']['rejected'], $territory['totals']['recall']]);
+        }
+    } elseif ($is_head) {
+        foreach ($employees as $emp) {
+            fputcsv($output, [
+                $emp['name'], $emp['tabel'], $emp['stats']['daily_plan'], $emp['stats']['total_tasks'],
+                $emp['stats']['calls_done'], $emp['stats']['on_control'], $emp['stats']['confirmed'],
+                $emp['stats']['rejected'], $emp['stats']['recall']
+            ]);
         }
     } else {
         foreach ($employees as $emp) {
@@ -176,10 +227,9 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv_tasks') {
     header('Content-Disposition: attachment; filename="tasks_comments_' . date('Ymd') . '.csv"');
     $output = fopen('php://output', 'w');
     fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
-    
+
     fputcsv($output, ['Номер задачи', 'Менеджер', 'Статус задачи', 'Статус звонка', 'Комментарий', 'Дата']);
-    
-    // Берем задачи из epk_tasks + комментарии из call_comments (если есть)
+
     $task_sql = "
         SELECT 
             e.task_id,
@@ -195,7 +245,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv_tasks') {
         ORDER BY e.imported_at DESC
     ";
     $task_params = [$filter_date_from, $filter_date_to];
-    
+
     if ($is_manager) {
         $task_sql = "
             SELECT 
@@ -228,11 +278,27 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv_tasks') {
             ORDER BY e.imported_at DESC
         ";
         $task_params = [$user_id, $filter_date_from, $filter_date_to];
+    } elseif ($is_terman) {
+        $task_sql = "
+            SELECT 
+                e.task_id,
+                u.full_name as manager_name,
+                e.status as task_status,
+                COALESCE(c.call_result, 'Нет звонка') as call_status,
+                COALESCE(c.comment_text, '') as comment_text,
+                COALESCE(c.created_at, e.imported_at) as date
+            FROM epk_tasks e
+            JOIN users u ON e.user_tabel = u.tabel_number
+            LEFT JOIN call_comments c ON e.task_id = c.task_id
+            WHERE date(e.imported_at) BETWEEN ? AND ?
+            ORDER BY e.imported_at DESC
+        ";
+        $task_params = [$filter_date_from, $filter_date_to];
     }
-    
+
     $stmt = $pdo->prepare($task_sql);
     $stmt->execute($task_params);
-    
+
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         fputcsv($output, [
             $row['task_id'],
@@ -243,7 +309,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv_tasks') {
             $row['date']
         ]);
     }
-    
+
     fclose($output);
     exit;
 }
@@ -300,10 +366,13 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
         .head-section { margin-bottom:24px; }
         .head-title { font-size:1.1rem; font-weight:600; color:#1a1a2e; margin-bottom:12px; padding:8px 12px; background:#e8f0fe; border-radius:8px; }
-        
+        .territory-title { font-size:1.2rem; font-weight:700; color:#1a1a2e; margin-bottom:16px; padding:12px 16px; background:#d2e3fc; border-radius:8px; display:flex; justify-content:space-between; align-items:center; }
+
         .toggle-btn { background:none; border:none; color:#1a73e8; cursor:pointer; font-size:0.85rem; margin-left:8px; }
         .team-table { margin-left:20px; margin-top:8px; display:none; }
         .team-table.show { display:table; }
+        .heads-table { margin-left:20px; margin-top:8px; display:none; }
+        .heads-table.show { display:table; }
 
         .empty-state { text-align:center; padding:40px; color:#888; }
     </style>
@@ -396,7 +465,14 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
                 $totals = ['daily_plan'=>0, 'total_tasks'=>0, 'calls_done'=>0, 'on_control'=>0, 'confirmed'=>0, 'rejected'=>0, 'recall'=>0];
                 foreach ($employees as $emp): 
                     $s = $emp['stats'];
-                    foreach ($totals as $k => $v) $totals[$k] += $s[$k];
+                    // Явное суммирование (исправлено)
+                    $totals['daily_plan'] += $s['daily_plan'];
+                    $totals['total_tasks'] += $s['total_tasks'];
+                    $totals['calls_done'] += $s['calls_done'];
+                    $totals['on_control'] += $s['on_control'];
+                    $totals['confirmed'] += $s['confirmed'];
+                    $totals['rejected'] += $s['rejected'];
+                    $totals['recall'] += $s['recall'];
                 ?>
                 <tr>
                     <td><strong><?= htmlspecialchars($emp['name']) ?></strong></td>
@@ -425,28 +501,30 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
     <?php endif; ?>
 
     <?php if ($is_terman): ?>
-    <!-- Термен: по руководителям -->
-    <?php foreach ($heads as $head): ?>
-    <div class="head-section card">
-        <div class="head-title">
-            <?= htmlspecialchars($head['name']) ?> (таб. <?= $head['tabel'] ?>)
-            <button class="toggle-btn" onclick="toggleTeam(<?= $head['id'] ?>)">👥 Показать команду</button>
-        </div>
-        
-        <!-- Статистика руководителя -->
-        <?php $s = $head['stats']; ?>
-        <div class="stats-bar" style="margin-bottom:12px;">
-            <div class="stat-card plan"><div class="value"><?= $s['daily_plan'] ?></div><div class="label">План/день</div></div>
-            <div class="stat-card done"><div class="value"><?= $s['total_tasks'] ?></div><div class="label">Задач</div></div>
-            <div class="stat-card done"><div class="value"><?= $s['calls_done'] ?></div><div class="label">Звонков</div></div>
-            <div class="stat-card control"><div class="value"><?= $s['on_control'] ?></div><div class="label">На контроле</div></div>
+    <!-- Термен: по территориям -->
+    <?php foreach ($territories_data as $territory): ?>
+    <div class="card">
+        <div class="territory-title">
+            <span>🌍 <?= htmlspecialchars($territory['name']) ?></span>
+            <button class="toggle-btn" onclick="toggleHeads(<?= $territory['id'] ?>)">👥 Показать руководителей</button>
         </div>
 
-        <!-- Команда -->
-        <table class="tb-table team-table" id="team_<?= $head['id'] ?>">
+        <!-- Итоги по территории -->
+        <div class="stats-bar" style="margin-bottom:16px;">
+            <div class="stat-card plan"><div class="value"><?= $territory['totals']['daily_plan'] ?></div><div class="label">План/день</div></div>
+            <div class="stat-card done"><div class="value"><?= $territory['totals']['total_tasks'] ?></div><div class="label">Задач</div></div>
+            <div class="stat-card done"><div class="value"><?= $territory['totals']['calls_done'] ?></div><div class="label">Звонков</div></div>
+            <div class="stat-card control"><div class="value"><?= $territory['totals']['on_control'] ?></div><div class="label">На контроле</div></div>
+            <div class="stat-card pending"><div class="value"><?= $territory['totals']['confirmed'] ?></div><div class="label">Подтверждено</div></div>
+            <div class="stat-card control"><div class="value"><?= $territory['totals']['rejected'] ?></div><div class="label">Отклонено</div></div>
+            <div class="stat-card pending"><div class="value"><?= $territory['totals']['recall'] ?></div><div class="label">Перепрозвон</div></div>
+        </div>
+
+        <!-- Руководители территории -->
+        <table class="tb-table heads-table" id="heads_<?= $territory['id'] ?>">
             <thead>
                 <tr>
-                    <th>Сотрудник</th>
+                    <th>Руководитель</th>
                     <th>План/день</th>
                     <th>Задач</th>
                     <th>Звонков</th>
@@ -454,36 +532,67 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
                     <th>Подтверждено</th>
                     <th>Отклонено</th>
                     <th>Перепрозвон</th>
+                    <th></th>
                 </tr>
             </thead>
             <tbody>
-                <?php 
-                $team_totals = ['daily_plan'=>0, 'total_tasks'=>0, 'calls_done'=>0, 'on_control'=>0, 'confirmed'=>0, 'rejected'=>0, 'recall'=>0];
-                foreach ($head['team'] as $emp): 
-                    $s = $emp['stats'];
-                    foreach ($team_totals as $k => $v) $team_totals[$k] += $s[$k];
-                ?>
+                <?php foreach ($territory['heads'] as $head): ?>
                 <tr>
-                    <td><?= htmlspecialchars($emp['name']) ?></td>
-                    <td><?= $s['daily_plan'] ?></td>
-                    <td><?= $s['total_tasks'] ?></td>
-                    <td><?= $s['calls_done'] ?></td>
-                    <td style="color:<?= $s['on_control'] > 0 ? '#dc3545' : '#28a745' ?>"><?= $s['on_control'] ?></td>
-                    <td style="color:#28a745;"><?= $s['confirmed'] ?></td>
-                    <td style="color:#dc3545;"><?= $s['rejected'] ?></td>
-                    <td style="color:#1a73e8;"><?= $s['recall'] ?></td>
+                    <td><strong><?= htmlspecialchars($head['name']) ?></strong></td>
+                    <td><?= $head['stats']['daily_plan'] ?></td>
+                    <td><?= $head['stats']['total_tasks'] + $head['team_totals']['total_tasks'] ?></td>
+                    <td><?= $head['stats']['calls_done'] + $head['team_totals']['calls_done'] ?></td>
+                    <td><?= $head['stats']['on_control'] + $head['team_totals']['on_control'] ?></td>
+                    <td><?= $head['stats']['confirmed'] + $head['team_totals']['confirmed'] ?></td>
+                    <td><?= $head['stats']['rejected'] + $head['team_totals']['rejected'] ?></td>
+                    <td><?= $head['stats']['recall'] + $head['team_totals']['recall'] ?></td>
+                    <td><button class="toggle-btn" onclick="toggleTeam(<?= $head['id'] ?>)">👥 Команда</button></td>
+                </tr>
+                <tr>
+                    <td colspan="9" style="padding:0;">
+                        <table class="tb-table team-table" id="team_<?= $head['id'] ?>">
+                            <thead>
+                                <tr>
+                                    <th>Сотрудник</th>
+                                    <th>План/день</th>
+                                    <th>Задач</th>
+                                    <th>Звонков</th>
+                                    <th>На контроле</th>
+                                    <th>Подтверждено</th>
+                                    <th>Отклонено</th>
+                                    <th>Перепрозвон</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($head['team'] as $emp): 
+                                    $s = $emp['stats'];
+                                ?>
+                                <tr>
+                                    <td><?= htmlspecialchars($emp['name']) ?></td>
+                                    <td><?= $s['daily_plan'] ?></td>
+                                    <td><?= $s['total_tasks'] ?></td>
+                                    <td><?= $s['calls_done'] ?></td>
+                                    <td style="color:<?= $s['on_control'] > 0 ? '#dc3545' : '#28a745' ?>"><?= $s['on_control'] ?></td>
+                                    <td style="color:#28a745;"><?= $s['confirmed'] ?></td>
+                                    <td style="color:#dc3545;"><?= $s['rejected'] ?></td>
+                                    <td style="color:#1a73e8;"><?= $s['recall'] ?></td>
+                                </tr>
+                                <?php endforeach; ?>
+                                <tr class="total-row">
+                                    <td>ИТОГО КОМАНДЫ</td>
+                                    <td><?= $head['team_totals']['daily_plan'] ?></td>
+                                    <td><?= $head['team_totals']['total_tasks'] ?></td>
+                                    <td><?= $head['team_totals']['calls_done'] ?></td>
+                                    <td><?= $head['team_totals']['on_control'] ?></td>
+                                    <td><?= $head['team_totals']['confirmed'] ?></td>
+                                    <td><?= $head['team_totals']['rejected'] ?></td>
+                                    <td><?= $head['team_totals']['recall'] ?></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </td>
                 </tr>
                 <?php endforeach; ?>
-                <tr class="total-row">
-                    <td>ИТОГО КОМАНДЫ</td>
-                    <td><?= $team_totals['daily_plan'] ?></td>
-                    <td><?= $team_totals['total_tasks'] ?></td>
-                    <td><?= $team_totals['calls_done'] ?></td>
-                    <td><?= $team_totals['on_control'] ?></td>
-                    <td><?= $team_totals['confirmed'] ?></td>
-                    <td><?= $team_totals['rejected'] ?></td>
-                    <td><?= $team_totals['recall'] ?></td>
-                </tr>
             </tbody>
         </table>
     </div>
@@ -497,10 +606,21 @@ function toggleTeam(headId) {
     const btn = event.target;
     if (table.classList.contains('show')) {
         table.classList.remove('show');
-        btn.textContent = '👥 Показать команду';
+        btn.textContent = '👥 Команда';
     } else {
         table.classList.add('show');
-        btn.textContent = '👥 Скрыть команду';
+        btn.textContent = '👥 Скрыть';
+    }
+}
+function toggleHeads(territoryId) {
+    const table = document.getElementById('heads_' + territoryId);
+    const btn = event.target;
+    if (table.classList.contains('show')) {
+        table.classList.remove('show');
+        btn.textContent = '👥 Показать руководителей';
+    } else {
+        table.classList.add('show');
+        btn.textContent = '👥 Скрыть руководителей';
     }
 }
 </script>

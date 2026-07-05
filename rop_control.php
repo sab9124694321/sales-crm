@@ -177,48 +177,55 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv_tasks') {
     $output = fopen('php://output', 'w');
     fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
     
-    fputcsv($output, ['Номер задачи', 'Менеджер', 'Статус', 'Комментарий', 'Дата']);
+    fputcsv($output, ['Номер задачи', 'Менеджер', 'Статус задачи', 'Статус звонка', 'Комментарий', 'Дата']);
     
+    // Берем задачи из epk_tasks + комментарии из call_comments (если есть)
     $task_sql = "
         SELECT 
-            c.task_id,
+            e.task_id,
             u.full_name as manager_name,
-            COALESCE(c.call_result, 'Нет статуса') as status,
-            c.comment_text,
-            c.created_at
-        FROM call_comments c
-        JOIN users u ON c.user_id = u.id
-        WHERE date(c.created_at) BETWEEN ? AND ?
-        ORDER BY c.created_at DESC
+            e.status as task_status,
+            COALESCE(c.call_result, 'Нет звонка') as call_status,
+            COALESCE(c.comment_text, '') as comment_text,
+            COALESCE(c.created_at, e.imported_at) as date
+        FROM epk_tasks e
+        JOIN users u ON e.user_tabel = u.tabel_number
+        LEFT JOIN call_comments c ON e.task_id = c.task_id
+        WHERE date(e.imported_at) BETWEEN ? AND ?
+        ORDER BY e.imported_at DESC
     ";
     $task_params = [$filter_date_from, $filter_date_to];
     
     if ($is_manager) {
         $task_sql = "
             SELECT 
-                c.task_id,
+                e.task_id,
                 u.full_name as manager_name,
-                COALESCE(c.call_result, 'Нет статуса') as status,
-                c.comment_text,
-                c.created_at
-            FROM call_comments c
-            JOIN users u ON c.user_id = u.id
-            WHERE c.user_id = ? AND date(c.created_at) BETWEEN ? AND ?
-            ORDER BY c.created_at DESC
+                e.status as task_status,
+                COALESCE(c.call_result, 'Нет звонка') as call_status,
+                COALESCE(c.comment_text, '') as comment_text,
+                COALESCE(c.created_at, e.imported_at) as date
+            FROM epk_tasks e
+            JOIN users u ON e.user_tabel = u.tabel_number
+            LEFT JOIN call_comments c ON e.task_id = c.task_id
+            WHERE e.user_tabel = ? AND date(e.imported_at) BETWEEN ? AND ?
+            ORDER BY e.imported_at DESC
         ";
-        $task_params = [$user_id, $filter_date_from, $filter_date_to];
+        $task_params = [$tabel, $filter_date_from, $filter_date_to];
     } elseif ($is_head) {
         $task_sql = "
             SELECT 
-                c.task_id,
+                e.task_id,
                 u.full_name as manager_name,
-                COALESCE(c.call_result, 'Нет статуса') as status,
-                c.comment_text,
-                c.created_at
-            FROM call_comments c
-            JOIN users u ON c.user_id = u.id
-            WHERE u.manager_id = ? AND date(c.created_at) BETWEEN ? AND ?
-            ORDER BY c.created_at DESC
+                e.status as task_status,
+                COALESCE(c.call_result, 'Нет звонка') as call_status,
+                COALESCE(c.comment_text, '') as comment_text,
+                COALESCE(c.created_at, e.imported_at) as date
+            FROM epk_tasks e
+            JOIN users u ON e.user_tabel = u.tabel_number
+            LEFT JOIN call_comments c ON e.task_id = c.task_id
+            WHERE u.manager_id = ? AND date(e.imported_at) BETWEEN ? AND ?
+            ORDER BY e.imported_at DESC
         ";
         $task_params = [$user_id, $filter_date_from, $filter_date_to];
     }
@@ -230,9 +237,10 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv_tasks') {
         fputcsv($output, [
             $row['task_id'],
             $row['manager_name'],
-            $row['status'],
+            $row['task_status'],
+            $row['call_status'],
             mb_substr($row['comment_text'], 0, 500),
-            $row['created_at']
+            $row['date']
         ]);
     }
     

@@ -22,6 +22,10 @@ $filter_month = $_GET['month'] ?? date('Y-m');
 $filter_date_from = $_GET['date_from'] ?? date('Y-m-01');
 $filter_date_to = $_GET['date_to'] ?? date('Y-m-d');
 
+// --- Фильтры для контроля ---
+$filter_status = $_GET['status'] ?? 'На проверке';
+$filter_territory = $_GET['territory'] ?? '';
+
 // --- Функция получения плана звонков ---
 function getCallPlan($pdo, $tabel_num) {
     $stmt = $pdo->prepare("SELECT calls_plan FROM plans WHERE tabel_number = ? AND period = strftime('%Y-%m', 'now')");
@@ -33,35 +37,28 @@ function getCallPlan($pdo, $tabel_num) {
 
 // --- Функция получения статистики сотрудника ---
 function getEmployeeStats($pdo, $emp_id, $emp_tabel, $date_from, $date_to) {
-    // План на день
     $daily_plan = getCallPlan($pdo, $emp_tabel);
 
-    // Всего задач
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM epk_tasks WHERE user_tabel = ?");
     $stmt->execute([$emp_tabel]);
     $total_tasks = (int)$stmt->fetchColumn();
 
-    // Выполнено звонков (из daily_reports)
     $stmt = $pdo->prepare("SELECT COALESCE(SUM(calls),0) FROM daily_reports WHERE user_id = ? AND report_date BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $calls_done = (int)$stmt->fetchColumn();
 
-    // На контроле РОП
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND date(created_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $on_control = (int)$stmt->fetchColumn();
 
-    // Подтверждено
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND status = 'Подтверждено' AND date(checked_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $confirmed = (int)$stmt->fetchColumn();
 
-    // Отклонено
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND status = 'Отклонено' AND date(checked_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $rejected = (int)$stmt->fetchColumn();
 
-    // Перепрозвон
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND status = 'Перепрозвон' AND date(checked_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $recall = (int)$stmt->fetchColumn();
@@ -77,13 +74,12 @@ function getEmployeeStats($pdo, $emp_id, $emp_tabel, $date_from, $date_to) {
     ];
 }
 
-// --- Собираем данные в зависимости от роли ---
+// --- Собираем данные ---
 $employees = [];
 $heads = [];
 $territories_data = [];
 
 if ($is_manager) {
-    // Сотрудник видит только себя
     $employees[] = [
         'id' => $user_id,
         'tabel' => $tabel,
@@ -91,7 +87,6 @@ if ($is_manager) {
         'stats' => getEmployeeStats($pdo, $user_id, $tabel, $filter_date_from, $filter_date_to)
     ];
 } elseif ($is_head) {
-    // Руководитель видит свою команду
     $stmt = $pdo->prepare("SELECT id, full_name, tabel_number FROM users WHERE is_active = 1 AND role IN ('manager', 'mmb_manager', 'ubr_middle') AND manager_id = ? ORDER BY full_name");
     $stmt->execute([$user_id]);
     $team = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -105,12 +100,10 @@ if ($is_manager) {
         ];
     }
 } elseif ($is_terman) {
-    // Термен видит территории
     $stmt = $pdo->query("SELECT id, name FROM territories WHERE name IS NOT NULL AND name != '' ORDER BY name");
     $territories_list = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     foreach ($territories_list as $territory) {
-        // Находим руководителей этой территории
         $stmt = $pdo->prepare("SELECT id, full_name, tabel_number, territory_id FROM users WHERE is_active = 1 AND role IN ('head', 'territory_head') AND territory_id = ? ORDER BY full_name");
         $stmt->execute([$territory['id']]);
         $territory_heads = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -121,7 +114,6 @@ if ($is_manager) {
         foreach ($territory_heads as $head) {
             $head_stats = getEmployeeStats($pdo, $head['id'], $head['tabel_number'], $filter_date_from, $filter_date_to);
 
-            // Команда руководителя
             $stmt = $pdo->prepare("SELECT id, full_name, tabel_number FROM users WHERE is_active = 1 AND role IN ('manager', 'mmb_manager', 'ubr_middle') AND manager_id = ? ORDER BY full_name");
             $stmt->execute([$head['id']]);
             $team = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -137,7 +129,6 @@ if ($is_manager) {
                     'name' => $member['full_name'],
                     'stats' => $member_stats
                 ];
-                // Суммируем в итоги команды
                 $team_totals['daily_plan'] += $member_stats['daily_plan'];
                 $team_totals['total_tasks'] += $member_stats['total_tasks'];
                 $team_totals['calls_done'] += $member_stats['calls_done'];
@@ -147,7 +138,6 @@ if ($is_manager) {
                 $team_totals['recall'] += $member_stats['recall'];
             }
 
-            // Суммируем в итоги территории
             $territory_totals['daily_plan'] += $head_stats['daily_plan'] + $team_totals['daily_plan'];
             $territory_totals['total_tasks'] += $head_stats['total_tasks'] + $team_totals['total_tasks'];
             $territory_totals['calls_done'] += $head_stats['calls_done'] + $team_totals['calls_done'];
@@ -172,6 +162,62 @@ if ($is_manager) {
             'heads' => $territory_heads_data,
             'totals' => $territory_totals
         ];
+    }
+}
+
+// --- Загрузка задач на контроле (для руководителей) ---
+$control_tasks = [];
+$status_counts = [
+    'На проверке' => 0,
+    'Подтверждено' => 0,
+    'Отклонено' => 0,
+    'Перепрозвон' => 0
+];
+
+if ($is_head) {
+    $tasks_sql = "
+        SELECT 
+            r.id as control_id,
+            r.task_id,
+            r.fraud_score,
+            r.comment_text,
+            r.status as control_status,
+            r.rop_comment,
+            r.rop_action,
+            r.created_at,
+            r.checked_at,
+            u.full_name as manager_name,
+            u.tabel_number as manager_tabel,
+            COALESCE(t.name, '—') as territory_name,
+            (SELECT COUNT(*) FROM call_comments WHERE task_id = r.task_id) as call_count,
+            (SELECT MAX(created_at) FROM call_comments WHERE task_id = r.task_id) as last_call_date
+        FROM rop_control_queue r
+        JOIN users u ON r.user_id = u.id
+        LEFT JOIN territories t ON u.territory_id = t.id
+        WHERE date(r.created_at) BETWEEN ? AND ?
+    ";
+    $tasks_params = [$filter_date_from, $filter_date_to];
+
+    if ($filter_status) {
+        $tasks_sql .= " AND r.status = ?";
+        $tasks_params[] = $filter_status;
+    }
+
+    if ($role !== 'admin') {
+        $tasks_sql .= " AND u.manager_id = ?";
+        $tasks_params[] = $user_id;
+    }
+
+    $tasks_sql .= " ORDER BY r.created_at DESC LIMIT 200";
+
+    $stmt = $pdo->prepare($tasks_sql);
+    $stmt->execute($tasks_params);
+    $control_tasks = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    foreach ($control_tasks as $t) {
+        if (isset($status_counts[$t['control_status']])) {
+            $status_counts[$t['control_status']]++;
+        }
     }
 }
 
@@ -348,7 +394,7 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
         .filters { display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap; align-items:end; }
         .filters label { font-size:0.8rem; font-weight:600; color:#555; display:block; margin-bottom:4px; }
-        .filters input { padding:8px 12px; border:1px solid #ddd; border-radius:8px; font-size:0.85rem; }
+        .filters input, .filters select { padding:8px 12px; border:1px solid #ddd; border-radius:8px; font-size:0.85rem; }
         .filters button, .filters a { padding:8px 16px; border:none; border-radius:8px; font-size:0.85rem; cursor:pointer; font-weight:600; text-decoration:none; display:inline-block; }
         .btn-primary { background:#1a73e8; color:#fff; }
         .btn-outline { background:#fff; color:#1a73e8; border:1px solid #1a73e8; }
@@ -375,6 +421,27 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
         .heads-table.show { display:table; }
 
         .empty-state { text-align:center; padding:40px; color:#888; }
+
+        /* Стили для блока контроля */
+        .status-badge { padding:4px 10px; border-radius:8px; font-size:0.75rem; font-weight:600; }
+        .status-pending { background:#fff3e0; color:#856404; }
+        .status-confirmed { background:#e8f5e9; color:#2e7d32; }
+        .status-rejected { background:#ffebee; color:#c62828; }
+        .status-recall { background:#e3f2fd; color:#1565c0; }
+
+        .task-item { border:1px solid #e8ecf1; border-radius:12px; padding:16px; margin-bottom:12px; transition:all 0.2s; }
+        .task-item:hover { box-shadow:0 2px 8px rgba(0,0,0,0.08); }
+        .task-header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px; flex-wrap:wrap; gap:8px; }
+        .task-meta { display:flex; gap:12px; flex-wrap:wrap; font-size:0.8rem; color:#666; }
+        .task-meta span { display:flex; align-items:center; gap:4px; }
+        .comment-preview { background:#f8f9fa; border-radius:8px; padding:12px; font-size:0.85rem; line-height:1.5; margin:10px 0; max-height:120px; overflow-y:auto; }
+        .actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+        .actions button { padding:6px 14px; border:none; border-radius:8px; font-size:0.8rem; cursor:pointer; font-weight:600; }
+        .btn-confirm { background:#28a745; color:#fff; }
+        .btn-reject { background:#dc3545; color:#fff; }
+        .btn-recall { background:#1a73e8; color:#fff; }
+        .rop-comment { width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; font-size:0.85rem; margin-top:8px; }
+        .rop-comment.hidden { display:none; }
     </style>
 </head>
 <body>
@@ -401,6 +468,18 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
                 <label>по</label>
                 <input type="date" name="date_to" value="<?= $filter_date_to ?>">
             </div>
+            <?php if ($is_head): ?>
+            <div>
+                <label>Статус</label>
+                <select name="status">
+                    <option value="" <?= $filter_status === '' ? 'selected' : '' ?>>Все</option>
+                    <option value="На проверке" <?= $filter_status === 'На проверке' ? 'selected' : '' ?>>На проверке</option>
+                    <option value="Подтверждено" <?= $filter_status === 'Подтверждено' ? 'selected' : '' ?>>Подтверждено</option>
+                    <option value="Отклонено" <?= $filter_status === 'Отклонено' ? 'selected' : '' ?>>Отклонено</option>
+                    <option value="Перепрозвон" <?= $filter_status === 'Перепрозвон' ? 'selected' : '' ?>>Перепрозвон</option>
+                </select>
+            </div>
+            <?php endif; ?>
             <div>
                 <label>&nbsp;</label>
                 <button type="submit" class="btn-primary">🔍 Показать</button>
@@ -417,7 +496,6 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
     </div>
 
     <?php if ($is_manager): ?>
-    <!-- Сотрудник: своя статистика -->
     <div class="stats-bar">
         <?php $s = $employees[0]['stats']; ?>
         <div class="stat-card plan">
@@ -444,7 +522,7 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
     <?php endif; ?>
 
     <?php if ($is_head): ?>
-    <!-- Руководитель: команда -->
+    <!-- Статистика команды -->
     <div class="card">
         <h3>📊 Статистика команды</h3>
         <table class="tb-table">
@@ -465,7 +543,6 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
                 $totals = ['daily_plan'=>0, 'total_tasks'=>0, 'calls_done'=>0, 'on_control'=>0, 'confirmed'=>0, 'rejected'=>0, 'recall'=>0];
                 foreach ($employees as $emp): 
                     $s = $emp['stats'];
-                    // Явное суммирование (исправлено)
                     $totals['daily_plan'] += $s['daily_plan'];
                     $totals['total_tasks'] += $s['total_tasks'];
                     $totals['calls_done'] += $s['calls_done'];
@@ -498,10 +575,76 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
             </tbody>
         </table>
     </div>
+
+    <!-- БЛОК КОНТРОЛЯ ЗАДАЧ -->
+    <div class="card">
+        <h3>📋 Задачи на контроле (<?= count($control_tasks) ?>)</h3>
+        
+        <div class="stats-bar" style="margin-bottom:16px;">
+            <div class="stat-card pending">
+                <div class="value"><?= $status_counts['На проверке'] ?></div>
+                <div class="label">⏳ На проверке</div>
+            </div>
+            <div class="stat-card plan">
+                <div class="value"><?= $status_counts['Подтверждено'] ?></div>
+                <div class="label">✅ Подтверждено</div>
+            </div>
+            <div class="stat-card control">
+                <div class="value"><?= $status_counts['Отклонено'] ?></div>
+                <div class="label">❌ Отклонено</div>
+            </div>
+            <div class="stat-card done">
+                <div class="value"><?= $status_counts['Перепрозвон'] ?></div>
+                <div class="label">📞 Перепрозвон</div>
+            </div>
+        </div>
+
+        <?php if (empty($control_tasks)): ?>
+            <div class="empty-state">Нет задач на контроле за выбранный период</div>
+        <?php else: ?>
+            <?php foreach ($control_tasks as $t): ?>
+            <div class="task-item" id="task_<?= $t['control_id'] ?>">
+                <div class="task-header">
+                    <div>
+                        <strong>Задача <?= htmlspecialchars($t['task_id']) ?></strong>
+                        <span class="score-badge <?= $t['fraud_score'] >= 70 ? 'score-high' : ($t['fraud_score'] >= 40 ? 'score-mid' : 'score-low') ?>">
+                            <?= $t['fraud_score'] ?>/100
+                        </span>
+                        <span class="status-badge status-<?= $t['control_status'] === 'На проверке' ? 'pending' : ($t['control_status'] === 'Подтверждено' ? 'confirmed' : ($t['control_status'] === 'Отклонено' ? 'rejected' : 'recall')) ?>">
+                            <?= $t['control_status'] ?>
+                        </span>
+                    </div>
+                    <div class="task-meta">
+                        <span>👤 <?= htmlspecialchars($t['manager_name']) ?></span>
+                        <span>📍 <?= htmlspecialchars($t['territory_name']) ?></span>
+                        <span>📅 <?= date('d.m.Y H:i', strtotime($t['created_at'])) ?></span>
+                    </div>
+                </div>
+                <div class="comment-preview">
+                    <strong>Комментарий менеджера:</strong><br>
+                    <?= nl2br(htmlspecialchars($t['comment_text'])) ?>
+                </div>
+                <?php if ($t['rop_comment']): ?>
+                <div class="comment-preview" style="background:#e8f5e9;">
+                    <strong>Комментарий РОПа:</strong> <?= htmlspecialchars($t['rop_comment']) ?>
+                    <span style="color:#888; font-size:0.75rem;">(<?= $t['rop_action'] ?> — <?= date('d.m.Y H:i', strtotime($t['checked_at'])) ?>)</span>
+                </div>
+                <?php endif; ?>
+                <?php if ($t['control_status'] === 'На проверке'): ?>
+                <div class="actions">
+                    <button class="btn-confirm" onclick="ropAction(<?= $t['control_id'] ?>, 'confirm')">✅ Подтвердить</button>
+                    <button class="btn-reject" onclick="ropAction(<?= $t['control_id'] ?>, 'reject')">❌ Отклонить</button>
+                    <button class="btn-recall" onclick="ropAction(<?= $t['control_id'] ?>, 'recall')">📞 Перепрозвон</button>
+                </div>
+                <textarea class="rop-comment hidden" id="comment_<?= $t['control_id'] ?>" placeholder="Комментарий обязателен при отклонении/перепрозвоне..."></textarea>
+                <?php endif; ?>
+            </div>
+            <?php endforeach; ?>
+        <?php endif; ?>
+    </div>
     <?php endif; ?>
 
     <?php if ($is_terman): ?>
-    <!-- Термен: по территориям -->
     <?php foreach ($territories_data as $territory): ?>
     <div class="card">
         <div class="territory-title">
@@ -509,7 +652,6 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
             <button class="toggle-btn" onclick="toggleHeads(<?= $territory['id'] ?>)">👥 Показать руководителей</button>
         </div>
 
-        <!-- Итоги по территории -->
         <div class="stats-bar" style="margin-bottom:16px;">
             <div class="stat-card plan"><div class="value"><?= $territory['totals']['daily_plan'] ?></div><div class="label">План/день</div></div>
             <div class="stat-card done"><div class="value"><?= $territory['totals']['total_tasks'] ?></div><div class="label">Задач</div></div>
@@ -520,7 +662,6 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
             <div class="stat-card pending"><div class="value"><?= $territory['totals']['recall'] ?></div><div class="label">Перепрозвон</div></div>
         </div>
 
-        <!-- Руководители территории -->
         <table class="tb-table heads-table" id="heads_<?= $territory['id'] ?>">
             <thead>
                 <tr>
@@ -622,6 +763,52 @@ function toggleHeads(territoryId) {
         table.classList.add('show');
         btn.textContent = '👥 Скрыть руководителей';
     }
+}
+
+// --- Блок контроля: действия РОПа ---
+function ropAction(controlId, action) {
+    const commentField = document.getElementById('comment_' + controlId);
+    
+    if (action === 'confirm') {
+        sendRopAction(controlId, action, '');
+    } else {
+        // Отклонить или Перепрозвон — нужен комментарий
+        if (commentField.classList.contains('hidden')) {
+            // Первый клик — показываем поле комментария
+            commentField.classList.remove('hidden');
+            commentField.focus();
+        } else {
+            // Второй клик — отправляем
+            const comment = commentField.value.trim();
+            if (!comment) {
+                alert('Комментарий обязателен при отклонении или перепрозвоне!');
+                return;
+            }
+            sendRopAction(controlId, action, comment);
+        }
+    }
+}
+
+function sendRopAction(controlId, action, comment) {
+    if (!confirm('Подтвердить действие?')) return;
+    
+    fetch('api_rop_action.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ control_id: controlId, action: action, comment: comment })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            alert('Успешно: ' + data.status);
+            location.reload();
+        } else {
+            alert('Ошибка: ' + (data.error || 'Неизвестная ошибка'));
+        }
+    })
+    .catch(err => {
+        alert('Ошибка сети: ' + err);
+    });
 }
 </script>
 </body>

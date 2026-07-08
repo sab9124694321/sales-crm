@@ -23,9 +23,11 @@ $done_today = $stmt->fetchColumn();
 $remaining = max(0, $daily_plan - $done_today);
 
 // --- Загрузка задач из БД ---
+// v2.1: включаем все статусы кроме завершённых (Договор заключён, Отказ подтверждён)
 $stmt = $pdo->prepare("
     SELECT * FROM epk_tasks 
-    WHERE user_tabel = ? AND status IN ('Назначена', 'Подтверждена', 'На контроле РОП')
+    WHERE user_tabel = ? 
+      AND status NOT IN ('Договор заключён', 'Отказ подтверждён')
     ORDER BY 
         CASE 
             WHEN next_call_date IS NOT NULL AND date(next_call_date) = date('now') THEN 0
@@ -71,610 +73,422 @@ $competitive = [
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>📞 Я звоню — SZB CRM</title>
+    <title>Я звоню — SZB CRM</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
         body { background:#f0f2f5; font-family:system-ui, -apple-system, sans-serif; padding:12px; }
         .container { max-width:1300px; margin:0 auto; }
-        .nav { display:flex; align-items:center; padding:12px 20px; background:linear-gradient(135deg,#1a1a2e,#16213e); color:#fff; border-radius:16px; margin-bottom:20px; gap:12px; flex-wrap:wrap; }
-        .nav a { color:#ccc; text-decoration:none; padding:8px 14px; border-radius:8px; font-size:13px; font-weight:500; }
-        .nav a:hover, .nav a.active { background:rgba(255,255,255,0.1); color:#fff; }
-        .nav .logo { font-size:20px; font-weight:700; color:#fff; margin-right:auto; }
-        .nav .user { margin-left:auto; color:#aaa; font-size:13px; }
-        .nav a.logout { color:#e03131; }
-
-        .stats-bar { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px,1fr)); gap:12px; margin-bottom:20px; }
-        .stat-card { background:#fff; border-radius:16px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05); text-align:center; }
-        .stat-card .value { font-size:2rem; font-weight:800; }
-        .stat-card .label { font-size:0.8rem; color:#666; }
-        .stat-card.plan { border-left:4px solid #1a73e8; }
-        .stat-card.done { border-left:4px solid #28a745; }
-        .stat-card.remaining { border-left:4px solid #ffc107; }
-        .stat-card.control { border-left:4px solid #dc3545; }
-
-        .main-grid { display:grid; grid-template-columns:380px 1fr; gap:16px; }
-        @media (max-width:1000px) { .main-grid { grid-template-columns:1fr; } }
-
-        .card { background:#fff; border-radius:16px; padding:20px; box-shadow:0 1px 3px rgba(0,0,0,0.05); margin-bottom:16px; }
-        .card h3 { margin-bottom:12px; font-size:1.1rem; display:flex; align-items:center; gap:8px; }
-        .card h3 .badge { background:#e8f0fe; color:#1a73e8; padding:2px 10px; border-radius:12px; font-size:0.75rem; }
-
-        .task-input { width:100%; padding:12px; border:1px solid #ddd; border-radius:12px; font-size:0.85rem; font-family:monospace; resize:vertical; min-height:60px; }
-        .task-input:focus { outline:none; border-color:#1a73e8; }
-        .btn { padding:10px 18px; border:none; border-radius:10px; font-size:0.85rem; cursor:pointer; font-weight:600; transition:all 0.2s; }
+        .nav { display:flex; align-items:center; padding:12px 20px; background:#fff; border-radius:12px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,0.1); }
+        .nav a { color:#1a73e8; text-decoration:none; font-weight:500; margin-right:20px; }
+        .nav a:hover { text-decoration:underline; }
+        .nav .right { margin-left:auto; font-size:0.85rem; color:#5f6368; }
+        .stats-bar { display:flex; gap:16px; padding:12px 20px; background:#fff; border-radius:12px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,0.1); }
+        .stat { text-align:center; }
+        .stat-value { font-size:1.5rem; font-weight:700; color:#1a73e8; }
+        .stat-label { font-size:0.75rem; color:#5f6368; }
+        .main { display:grid; grid-template-columns:320px 1fr; gap:12px; }
+        @media(max-width:900px){ .main { grid-template-columns:1fr; } }
+        .panel { background:#fff; border-radius:12px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,0.1); }
+        .panel h3 { margin-bottom:12px; font-size:1rem; color:#202124; }
+        .task-item { padding:10px 12px; border-radius:8px; margin-bottom:6px; cursor:pointer; transition:all 0.2s; border-left:3px solid transparent; position:relative; }
+        .task-item:hover { background:#f8f9fa; }
+        .task-item.active { background:#e8f0fe; border-left-color:#1a73e8; }
+        .task-item .task-num { font-weight:600; font-size:0.85rem; color:#1a73e8; }
+        .task-item .task-status { font-size:0.7rem; padding:2px 6px; border-radius:4px; margin-left:6px; }
+        .task-item .task-calls { font-size:0.7rem; color:#5f6368; margin-left:6px; }
+        .task-item .task-think-time { font-size:0.7rem; color:#f9ab00; margin-left:6px; }
+        .task-item .task-product { font-size:0.75rem; color:#5f6368; margin-top:2px; }
+        .task-item .task-date { font-size:0.7rem; color:#80868b; }
+        .task-item .delete-btn { position:absolute; right:8px; top:50%; transform:translateY(-50%); background:#fce8e6; color:#c5221f; border:none; border-radius:4px; padding:2px 6px; font-size:0.7rem; cursor:pointer; opacity:0; transition:opacity 0.2s; }
+        .task-item:hover .delete-btn { opacity:1; }
+        .status-badge { display:inline-block; padding:2px 8px; border-radius:12px; font-size:0.7rem; font-weight:500; }
+        .status-new { background:#e8f0fe; color:#1a73e8; }
+        .status-confirmed { background:#e6f4ea; color:#188038; }
+        .status-rop { background:#fce8e6; color:#c5221f; }
+        .status-think { background:#fef3e8; color:#b06000; }
+        .status-noanswer { background:#f3e8fd; color:#9334e6; }
+        .smart-form { display:grid; gap:10px; }
+        .smart-form label { font-size:0.8rem; font-weight:500; color:#5f6368; }
+        .smart-form input, .smart-form select, .smart-form textarea { padding:8px 12px; border:1px solid #dadce0; border-radius:8px; font-size:0.9rem; width:100%; }
+        .smart-form textarea { min-height:80px; resize:vertical; }
+        .btn { padding:10px 16px; border:none; border-radius:8px; cursor:pointer; font-size:0.85rem; font-weight:500; transition:all 0.2s; }
         .btn-primary { background:#1a73e8; color:#fff; }
         .btn-primary:hover { background:#1557b0; }
-        .btn-success { background:#28a745; color:#fff; }
-        .btn-success:hover { background:#218838; }
-        .btn-outline { background:#fff; color:#1a73e8; border:1px solid #1a73e8; }
-        .btn-outline:hover { background:#f0f7ff; }
-        .btn-warning { background:#ffc107; color:#333; }
-        .btn-danger { background:#dc3545; color:#fff; }
-        .btn-group { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
-
-        .task-item { border:1px solid #e8ecf1; border-radius:12px; padding:12px; margin-bottom:10px; cursor:pointer; transition:all 0.2s; position:relative; }
-        .task-item:hover { border-color:#1a73e8; box-shadow:0 2px 8px rgba(26,115,232,0.1); transform:translateY(-1px); }
-        .task-item.active { border-color:#1a73e8; background:#f8fbff; }
-        .task-item.urgent { border-left:4px solid #dc3545; background:#fff5f5; }
-        .task-item.soon { border-left:4px solid #ffc107; background:#fffbf0; }
-        .task-item.control { border-left:4px solid #dc3545; background:#fff5f5; border:2px solid #dc3545; }
-        .task-item .task-header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:6px; }
-        .task-item .task-title { font-weight:600; font-size:0.9rem; }
-        .task-item .task-meta { font-size:0.75rem; color:#888; }
-        .task-item .task-time { font-size:0.7rem; font-weight:600; margin-top:4px; }
-        .task-item .task-time.urgent { color:#dc3545; }
-        .task-item .task-time.soon { color:#ed6c02; }
-        .task-item .readiness-bar { height:4px; background:#e0e0e0; border-radius:2px; margin-top:8px; overflow:hidden; }
-        .task-item .readiness-fill { height:100%; border-radius:2px; transition:width 0.3s; }
-        .readiness-low { background:#d32f2f; }
-        .readiness-mid { background:#ed6c02; }
-        .readiness-high { background:#2e7d32; }
-        .readiness-badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:0.7rem; font-weight:600; }
-        .readiness-badge.low { background:#ffebee; color:#c62828; }
-        .readiness-badge.mid { background:#fff3e0; color:#ef6c00; }
-        .readiness-badge.high { background:#e8f5e9; color:#2e7d32; }
-        .control-badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:0.7rem; font-weight:600; background:#ffebee; color:#c62828; }
-
-        .ai-assistant { background:linear-gradient(135deg,#e6f7ff,#f0f9ff); border-left:4px solid #1890ff; border-radius:12px; padding:16px; margin-bottom:16px; }
-        .ai-assistant .ai-header { display:flex; align-items:center; gap:8px; margin-bottom:10px; font-weight:600; color:#1a73e8; font-size:0.95rem; }
-        .ai-assistant .ai-plan { background:#fff; border-radius:8px; padding:12px; font-size:0.85rem; line-height:1.5; }
-        .ai-assistant .ai-plan ul { margin:6px 0; padding-left:18px; }
-        .ai-assistant .ai-plan li { margin-bottom:4px; }
-        .ai-assistant .ai-loading { color:#888; font-style:italic; }
-
-        .smart-form { background:#f8f9fa; border-radius:12px; padding:16px; margin-bottom:16px; }
-        .smart-form .form-section { margin-bottom:14px; }
-        .smart-form .form-label { font-size:0.8rem; font-weight:600; color:#555; margin-bottom:6px; display:block; }
-        .smart-form .form-label .required { color:#dc3545; }
-        .smart-form .form-hint { font-size:0.75rem; color:#888; margin-top:2px; }
-        .smart-form input, .smart-form select, .smart-form textarea { width:100%; padding:10px 12px; border:1px solid #ddd; border-radius:10px; font-size:0.85rem; font-family:inherit; }
-        .smart-form input:focus, .smart-form select:focus, .smart-form textarea:focus { outline:none; border-color:#1a73e8; }
-        .smart-form textarea { min-height:60px; resize:vertical; }
-        .smart-form .field-error { border-color:#dc3545 !important; background:#fff5f5; }
-        .smart-form .field-success { border-color:#28a745 !important; background:#f0fff4; }
-
-        .assembled-comment { background:#fff; border:1px solid #e0e0e0; border-radius:10px; padding:12px; font-size:0.85rem; line-height:1.5; margin-bottom:12px; }
-        .assembled-comment .comment-header { font-weight:600; color:#333; margin-bottom:6px; font-size:0.8rem; }
-        .assembled-comment .comment-body { color:#555; white-space:pre-wrap; }
-
-        .fraud-score { display:flex; align-items:center; gap:12px; padding:12px; border-radius:10px; margin-bottom:12px; }
-        .fraud-score.green { background:#e8f5e9; border:1px solid #28a745; }
-        .fraud-score.yellow { background:#fff3e0; border:1px solid #ffc107; }
-        .fraud-score.red { background:#ffebee; border:1px solid #dc3545; }
-        .fraud-score .score-circle { width:48px; height:48px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:1.1rem; color:#fff; }
-        .fraud-score.green .score-circle { background:#28a745; }
-        .fraud-score.yellow .score-circle { background:#ffc107; color:#333; }
-        .fraud-score.red .score-circle { background:#dc3545; }
-        .fraud-score .score-text { font-size:0.85rem; }
-        .fraud-score .score-text strong { display:block; font-size:0.9rem; margin-bottom:2px; }
-
-        .history-block { background:#f8f9fa; border-radius:10px; padding:12px; margin-bottom:12px; max-height:200px; overflow-y:auto; }
-        .history-entry { padding:8px; background:#fff; border-radius:8px; margin-bottom:6px; font-size:0.8rem; border-left:3px solid #1a73e8; }
-        .history-entry .h-date { font-size:0.7rem; color:#888; margin-bottom:2px; }
-        .history-entry .h-status { display:inline-block; padding:1px 6px; border-radius:6px; font-size:0.7rem; font-weight:600; margin-bottom:2px; }
-
-        .copy-toast { position:fixed; bottom:20px; right:20px; background:#28a745; color:#fff; padding:12px 20px; border-radius:12px; font-size:0.9rem; box-shadow:0 4px 12px rgba(0,0,0,0.15); opacity:0; transition:opacity 0.3s; z-index:1000; }
-        .copy-toast.show { opacity:1; }
-
-        .empty-state { text-align:center; padding:40px; color:#888; }
-        .empty-state .icon { font-size:3rem; margin-bottom:12px; }
-
-        .tortuga-link { display:inline-flex; align-items:center; gap:6px; background:#f0f7ff; color:#1a73e8; padding:8px 16px; border-radius:10px; text-decoration:none; font-size:0.85rem; font-weight:500; }
-        .tortuga-link:hover { background:#e8f0fe; }
-
-        .datetime-row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-
-        .rop-warning { background:#fff3e0; border:1px solid #ffc107; border-radius:10px; padding:12px; margin-bottom:12px; font-size:0.85rem; color:#856404; }
-        .rop-warning strong { color:#856404; }
-
-        .security-notice { background:#e8f5e9; border:1px solid #28a745; border-radius:10px; padding:10px; margin-bottom:12px; font-size:0.8rem; color:#2e7d32; }
+        .btn-secondary { background:#f1f3f4; color:#3c4043; }
+        .btn-secondary:hover { background:#e8eaed; }
+        .btn-danger { background:#fce8e6; color:#c5221f; }
+        .btn-danger:hover { background:#fad2cf; }
+        .btn-success { background:#e6f4ea; color:#188038; }
+        .btn-success:hover { background:#ceead6; }
+        .btn-group { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+        .comment-preview { background:#f8f9fa; padding:12px; border-radius:8px; font-size:0.85rem; line-height:1.5; margin:12px 0; border-left:3px solid #1a73e8; }
+        .toast { position:fixed; bottom:20px; right:20px; background:#323232; color:#fff; padding:12px 20px; border-radius:8px; opacity:0; transform:translateY(20px); transition:all 0.3s; z-index:1000; }
+        .toast.show { opacity:1; transform:translateY(0); }
+        .history-entry { padding:8px 0; border-bottom:1px solid #e8eaed; }
+        .history-entry:last-child { border-bottom:none; }
+        .h-date { font-size:0.7rem; color:#80868b; }
+        .h-status { font-size:0.75rem; padding:2px 6px; border-radius:4px; }
+        .ai-box { background:#f8f9fa; border-radius:8px; padding:12px; margin-top:12px; font-size:0.85rem; }
+        .ai-box ul { padding-left:16px; margin:6px 0; }
+        .ai-box li { margin:4px 0; }
+        .competitor { background:#fff8e1; border-radius:8px; padding:10px; margin-top:8px; font-size:0.8rem; }
+        .empty-state { text-align:center; padding:40px; color:#80868b; }
+        .form-section { margin-bottom:16px; }
+        .form-section-title { font-size:0.8rem; font-weight:600; color:#5f6368; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px; }
     </style>
 </head>
 <body>
 <div class="container">
     <div class="nav">
-        <a href="dashboard.php" class="logo">🚀 SZB</a>
         <a href="dashboard.php">Дашборд</a>
-        <a href="team.php">Команда</a>
-        <a href="export_inn.php">ИНН</a>
-        <a href="quests.php">Квесты</a>
-        <a href="calls.php" class="active">📞 Я звоню</a>
-        <a href="rop_control.php">🛡️ Контроль</a>
-        <a href="ai.php">AI</a>
-        <span class="user">👤 <?= htmlspecialchars($user_name) ?></span>
-        <a href="logout.php" class="logout">Выйти</a>
+        <a href="calls.php">Я звоню</a>
+        <a href="rop_control.php">Контроль</a>
+        <span class="right"><?= htmlspecialchars($user_name) ?> | <?= $tabel ?></span>
     </div>
 
     <div class="stats-bar">
-        <div class="stat-card plan"><div class="value"><?= $daily_plan ?></div><div class="label">📊 План на день</div></div>
-        <div class="stat-card done"><div class="value"><?= $done_today ?></div><div class="label">✅ Сделано</div></div>
-        <div class="stat-card remaining"><div class="value"><?= $remaining ?></div><div class="label">⏳ Осталось</div></div>
-        <div class="stat-card control"><div class="value"><?= count(array_filter($tasks, fn($t) => ($t['status'] ?? '') === 'На контроле РОП')) ?></div><div class="label">🚨 На контроле</div></div>
+        <div class="stat"><div class="stat-value"><?= $daily_plan ?></div><div class="stat-label">План на день</div></div>
+        <div class="stat"><div class="stat-value"><?= $done_today ?></div><div class="stat-label">Сделано</div></div>
+        <div class="stat"><div class="stat-value"><?= $remaining ?></div><div class="stat-label">Осталось</div></div>
+        <div class="stat"><div class="stat-value"><?= count($tasks) ?></div><div class="stat-label">Задач</div></div>
     </div>
 
-    <div class="main-grid">
-        <!-- Левая колонка -->
-        <div>
-            <div class="card">
-                <h3>📋 Пул задач <span class="badge"><?= count($tasks) ?></span></h3>
-                <div style="margin-bottom:16px;">
-                    <label style="font-weight:600; font-size:0.85rem; display:block; margin-bottom:6px;">📝 Вставьте номера задач из Ритм</label>
-                    <textarea id="taskIdsInput" class="task-input" placeholder="00def9ac-df58-43b8-b075-e5cc8d611910
-f7ebd7bb-49ff-40dc-bd52-25a6a54d2bb0"></textarea>
-                    <div style="font-size:0.75rem; color:#888; margin-top:4px;">💡 Система найдёт UUID автоматически</div>
-                    <div class="btn-group">
-                        <button class="btn btn-primary" onclick="addTasks()">➕ Добавить</button>
-                        <button class="btn btn-outline" onclick="clearTasks()">🗑️ Очистить</button>
-                    </div>
-                    <div id="addResult" style="margin-top:8px; font-size:0.8rem;"></div>
-                </div>
+    <div class="main">
+        <!-- Левая колонка: список задач -->
+        <div class="panel">
+            <h3>Задачи</h3>
+            <?php if (empty($tasks)): ?>
+                <div class="empty-state">Нет задач</div>
+            <?php else: ?>
+                <?php foreach ($tasks as $task): 
+                    $tid = $task['task_id'];
+                    $p = $progress[$tid] ?? null;
+                    $calls = $p['total_calls'] ?? 0;
+                    $last_result = $p['last_result'] ?? '';
+                    $status_class = 'status-new';
+                    $status_text = 'Новая';
+                    if ($task['status'] === 'Подтверждена') { $status_class = 'status-confirmed'; $status_text = 'Подтверждена'; }
+                    elseif ($task['status'] === 'На контроле РОП') { $status_class = 'status-rop'; $status_text = 'На контроле'; }
+                    elseif ($task['status'] === 'Думает') { $status_class = 'status-think'; $status_text = 'Думает'; }
+                    elseif ($task['status'] === 'Недозвон') { $status_class = 'status-noanswer'; $status_text = 'Недозвон'; }
 
-                <div id="taskList">
-                    <?php if (empty($tasks)): ?>
-                        <div class="empty-state" id="emptyTasks"><div class="icon">📭</div><div>Задач пока нет</div><div style="font-size:0.8rem; margin-top:8px;">Вставьте номера из Ритм</div></div>
-                    <?php else: 
+                    // Время в статусе "думает"
+                    $think_time_str = '';
+                    if ($task['status'] === 'Думает' && $task['first_status_at']) {
+                        $first = new DateTime($task['first_status_at']);
                         $now = new DateTime();
-                        foreach ($tasks as $task): 
-                            $task_id = $task['task_id'];
-                            $prog = $progress[$task_id] ?? null;
-                            $readiness = $prog ? (int)$prog['max_readiness'] : 0;
-                            $next_call = $prog && $prog['next_call_date'] ? new DateTime($prog['next_call_date']) : null;
-                            $is_control = ($task['status'] ?? '') === 'На контроле РОП';
-
-                            $urgency_class = '';
-                            $time_text = '';
-                            if ($is_control) {
-                                $urgency_class = 'control';
-                                $time_text = '🚨 На контроле РОП';
-                            } elseif ($next_call) {
-                                $diff = $now->diff($next_call);
-                                $hours = ($diff->days * 24) + $diff->h;
-                                if ($next_call < $now) {
-                                    $urgency_class = 'urgent';
-                                    $time_text = '⚠️ Просрочено: ' . $next_call->format('d.m H:i');
-                                } elseif ($hours < 1) {
-                                    $urgency_class = 'urgent';
-                                    $time_text = '🔥 Скоро: ' . $next_call->format('H:i');
-                                } elseif ($hours < 24) {
-                                    $urgency_class = 'soon';
-                                    $time_text = '⏰ ' . $next_call->format('d.m H:i');
-                                } else {
-                                    $time_text = '📅 ' . $next_call->format('d.m H:i');
-                                }
-                            }
-                            $readiness_class = $readiness < 30 ? 'low' : ($readiness < 70 ? 'mid' : 'high');
-                    ?>
-                        <div class="task-item <?= $urgency_class ?>" data-task-id="<?= htmlspecialchars($task_id) ?>" onclick="selectTask(this)">
-                            <div class="task-header">
-                                <div>
-                                    <div class="task-title"><?= htmlspecialchars($task['product'] ?: 'Торговый эквайринг') ?></div>
-                                    <div class="task-meta">Задача: ...<?= htmlspecialchars(substr($task_id, -8)) ?></div>
-                                    <?php if ($time_text): ?>
-                                        <div class="task-time <?= $urgency_class ?>"><?= $time_text ?></div>
-                                    <?php endif; ?>
-                                </div>
-                                <div>
-                                    <?php if ($is_control): ?>
-                                        <span class="control-badge">🚨 КОНТРОЛЬ</span>
-                                    <?php else: ?>
-                                        <span class="readiness-badge <?= $readiness_class ?>"><?= $readiness ?>%</span>
-                                    <?php endif; ?>
-                                </div>
-                            </div>
-                            <div class="readiness-bar"><div class="readiness-fill <?= $readiness_class ?>" style="width:<?= $readiness ?>%"></div></div>
-                        </div>
-                    <?php endforeach; endif; ?>
+                        $diff = $first->diff($now);
+                        $think_time_str = $diff->format('%dд %hч');
+                    }
+                ?>
+                <div class="task-item" data-task="<?= htmlspecialchars($tid) ?>" onclick="selectTask('<?= htmlspecialchars($tid) ?>')">
+                    <div style="display:flex;align-items:center;flex-wrap:wrap;">
+                        <span class="task-num"><?= htmlspecialchars(substr($tid, 0, 8)) ?>...</span>
+                        <span class="status-badge <?= $status_class ?>"><?= $status_text ?></span>
+                        <?php if ($calls > 0): ?><span class="task-calls">(<?= $calls ?> зв.)</span><?php endif; ?>
+                        <?php if ($think_time_str): ?><span class="task-think-time"><?= $think_time_str ?></span><?php endif; ?>
+                        <?php if ($task['status'] === 'Назначена'): ?>
+                            <button class="delete-btn" onclick="event.stopPropagation(); deleteTask('<?= htmlspecialchars($tid) ?>')" title="Удалить">×</button>
+                        <?php endif; ?>
+                    </div>
+                    <div class="task-product"><?= htmlspecialchars($task['product'] ?? 'Торговый эквайринг') ?></div>
+                    <div class="task-date"><?= $task['next_call_date'] ? date('d.m.Y H:i', strtotime($task['next_call_date'])) : 'Без даты' ?></div>
                 </div>
-            </div>
+                <?php endforeach; ?>
+            <?php endif; ?>
         </div>
 
-        <!-- Правая колонка -->
-        <div>
-            <div class="card" id="workArea" style="display:none;">
-                <h3>📞 Звонок <span id="taskTitle" class="badge">—</span></h3>
+        <!-- Правая колонка: форма -->
+        <div class="panel" id="formPanel">
+            <h3 id="formTitle">Выберите задачу</h3>
+            <div id="formContent" style="display:none;">
 
-                <div class="security-notice">
-                    🔒 <strong>Безопасность:</strong> ПДН клиентов не хранятся. Все данные — только в Ритм. Комментарии обезличены.
+                <div class="form-section">
+                    <div class="form-section-title">Результат звонка</div>
+                    <select id="callStatus" onchange="onStatusChange()">
+                        <option value="think">Думает</option>
+                        <option value="signed">Подписан</option>
+                        <option value="reject">Отказ</option>
+                        <option value="noanswer">Недозвон</option>
+                        <option value="contract">Договор заключён</option>
+                        <option value="recall">Перезвон</option>
+                        <option value="nocontact">Нет контакта</option>
+                    </select>
                 </div>
 
-                <div style="margin-bottom:12px; padding:10px; background:#f8f9fa; border-radius:8px; font-size:0.8rem;">
-                    <div><strong>Продукт:</strong> <span id="productInfo">—</span></div>
-                    <div style="margin-top:4px; font-family:monospace; font-size:0.75rem; color:#1a73e8;"><strong>Задача Ритм:</strong> <span id="taskIdDisplay">—</span></div>
-                </div>
-
-                <div style="margin-bottom:12px;">
-                    <a id="tortugaLink" href="#" target="_blank" class="tortuga-link">🔗 Открыть задачу в Ритм</a>
-                </div>
-
-                <!-- === ИИ-АССИСТЕНТ === -->
-                <div class="ai-assistant" id="aiAssistant">
-                    <div class="ai-header">🤖 ИИ-ассистент Сбер</div>
-                    <div class="ai-plan" id="aiPlan">
-                        <div class="ai-loading">Анализирую историю задачи...</div>
-                    </div>
-                </div>
-
-                <!-- === SMART-ФОРМА === -->
-                <div class="smart-form">
-                    <h4 style="margin-bottom:12px; font-size:0.95rem;">📝 Структура разговора</h4>
-                    
+                <div id="smartFields">
                     <div class="form-section">
-                        <label class="form-label">Что беспокоит клиента? <span class="required">*</span></label>
-                        <textarea id="painPoint" placeholder="Например: высокая комиссия у текущего банка, нет СБП, сложная отчётность..."></textarea>
-                        <div class="form-hint">Ключевая проблема, которую озвучил клиент (без имен и данных)</div>
+                        <div class="form-section-title">1. Что беспокоит клиента?</div>
+                        <input type="text" id="painPoint" placeholder="Проблема клиента">
                     </div>
-
                     <div class="form-section">
-                        <label class="form-label">Какие возражения звучали? <span class="required">*</span></label>
-                        <select id="objectionsSelect">
-                            <option value="">— Выберите основное возражение —</option>
-                            <option value="price">💰 Дорого / высокая комиссия</option>
-                            <option value="competitor">🏦 Уже есть / ушёл к конкуренту</option>
-                            <option value="not_now">⏱️ Не нужен сейчас / нет времени</option>
-                            <option value="think">🤔 Подумаю / обсужу с руководством</option>
-                            <option value="bad_exp">😞 Плохой опыт с Сбером</option>
-                            <option value="other">📝 Другое</option>
+                        <div class="form-section-title">2. Возражения</div>
+                        <select id="objection">
+                            <option value="">Выберите...</option>
+                            <option value="цена">Цена</option>
+                            <option value="конкуренты">Конкуренты</option>
+                            <option value="не_нужен">Не нужен сейчас</option>
+                            <option value="нет_решения">Нет решения</option>
+                            <option value="другое">Другое</option>
                         </select>
-                        <textarea id="objectionsText" style="margin-top:6px;" placeholder="Как отработали возражение? Что сказали клиенту?"></textarea>
+                        <textarea id="objectionText" placeholder="Детали возражения" style="margin-top:6px;"></textarea>
                     </div>
-
                     <div class="form-section">
-                        <label class="form-label">Что договорились? <span class="required">*</span></label>
-                        <textarea id="nextStep" placeholder="Например: отправить КП до пятницы, перезвонить после совета директоров, подготовить сравнительную таблицу..."></textarea>
-                        <div class="form-hint">Конкретное действие с ответственным и дедлайном</div>
+                        <div class="form-section-title">3. Что договорились?</div>
+                        <textarea id="nextStep" placeholder="Конкретные договорённости"></textarea>
                     </div>
-
                     <div class="form-section">
-                        <label class="form-label">Кто принимает решение? <span class="required">*</span></label>
-                        <input type="text" id="decisionMaker" placeholder="Например: директор, бухгалтер, владелец бизнеса...">
-                        <div class="form-hint">Роль лица, которое решает о подключении (не ФИО)</div>
+                        <div class="form-section-title">4. Кто принимает решение?</div>
+                        <input type="text" id="decisionMaker" placeholder="Роль (не ФИО)">
                     </div>
-
                     <div class="form-section">
-                        <label class="form-label">📅 Когда следующий контакт? <span class="required">*</span></label>
-                        <div class="datetime-row">
-                            <input type="date" id="nextCallDate">
-                            <input type="time" id="nextCallTime" value="10:00">
-                        </div>
-                        <div class="form-hint">Дата и время следующего звонка или встречи</div>
-                    </div>
-
-                    <div class="form-section">
-                        <label class="form-label">Свободный комментарий (дополнительно)</label>
-                        <textarea id="freeComment" placeholder="Всё, что не вошло в структуру (без ПДН: имен, телефонов, ИНН)..."></textarea>
-                        <div class="form-hint">Не указывайте ФИО, телефоны, ИНН — это запрещено политикой безопасности</div>
+                        <div class="form-section-title">5. Следующий контакт</div>
+                        <input type="date" id="nextCallDate">
+                        <input type="time" id="nextCallTime" style="margin-top:6px;">
                     </div>
                 </div>
 
-                <!-- === СБОРНЫЙ КОММЕНТАРИЙ === -->
-                <div class="assembled-comment" id="assembledComment" style="display:none;">
-                    <div class="comment-header">📋 Сборный комментарий (будет сохранён):</div>
-                    <div class="comment-body" id="commentBody"></div>
+                <div class="form-section">
+                    <div class="form-section-title">Комментарий</div>
+                    <textarea id="freeComment" placeholder="Свободный комментарий..."></textarea>
                 </div>
 
-                <!-- === ФРОД-СКОР === -->
-                <div id="fraudScore" style="display:none;"></div>
-
-                <!-- === РОП ПРЕДУПРЕЖДЕНИЕ === -->
-                <div class="rop-warning" id="ropWarning" style="display:none;">
-                    <strong>⚠️ Задача отправлена на контроль руководителю</strong><br>
-                    Ваш звонок будет проверен. Руководитель может запросить перепрозвон.
-                </div>
-
-                <!-- === ИСТОРИЯ === -->
-                <div id="historySection" style="margin-bottom:12px; display:none;">
-                    <div style="font-weight:600; font-size:0.85rem; margin-bottom:6px;">📜 История комментариев</div>
-                    <div class="history-block" id="historyList"></div>
+                <div class="comment-preview" id="assembledComment" style="display:none;">
+                    <strong>Собранный комментарий:</strong><br>
+                    <span id="commentText"></span>
                 </div>
 
                 <div class="btn-group">
-                    <button class="btn btn-success" id="saveBtn" onclick="saveComment()">💾 Сохранить звонок</button>
-                    <button class="btn btn-outline" onclick="copyAndGo()">📋 Копировать и перейти в задачу</button>
+                    <button class="btn btn-secondary" onclick="copyComment()">Копировать</button>
+                    <button class="btn btn-primary" onclick="saveCall()">Сохранить звонок</button>
+                    <button class="btn btn-secondary" onclick="copyAndGo()">Скопировать и перейти в Ритм</button>
                 </div>
-            </div>
 
-            <div class="card" id="emptyWorkArea">
-                <div class="empty-state"><div class="icon">👆</div><div>Выберите задачу из пула</div></div>
+                <div id="aiSection" style="margin-top:16px;">
+                    <button class="btn btn-secondary" onclick="getPlan()" style="width:100%;">Получить микроплан</button>
+                    <div class="ai-box" id="aiPlan" style="display:none;"></div>
+                </div>
+
+                <div id="historySection" style="margin-top:16px; display:none;">
+                    <h4 style="font-size:0.9rem; margin-bottom:8px;">История</h4>
+                    <div id="historyList"></div>
+                </div>
             </div>
         </div>
     </div>
 </div>
 
-<div class="copy-toast" id="copyToast">✅ Скопировано! Переходим в задачу...</div>
+<div class="toast" id="toast"></div>
 
 <script>
 let currentTask = null;
-let currentTaskData = null;
 let commentHistory = [];
-let fraudScore = 0;
 
-// ========== Добавление задач ==========
-function addTasks() {
-    const input = document.getElementById('taskIdsInput').value.trim();
-    if (!input) { alert('Вставьте номера задач'); return; }
-    const matches = input.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi);
-    if (!matches) {
-        document.getElementById('addResult').innerHTML = '<span style="color:#dc3545;">❌ UUID не найден</span>';
-        return;
-    }
-    fetch('api_add_tasks.php', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({task_ids: [...new Set(matches.map(m => m.toLowerCase()))]})
-    })
-    .then(r => r.json())
-    .then(d => {
-        if (d.success) {
-            document.getElementById('addResult').innerHTML = `<span style="color:#28a745;">✅ Добавлено ${d.added}, пропущено ${d.skipped}</span>`;
-            document.getElementById('taskIdsInput').value = '';
-            setTimeout(() => location.reload(), 10000);
-        } else {
-            document.getElementById('addResult').innerHTML = `<span style="color:#dc3545;">❌ ${d.error}</span>`;
-        }
-    });
-}
-function clearTasks() {
-    if (!confirm('Очистить пул?')) return;
-    fetch('api_clear_tasks.php', {method: 'POST'})
-    .then(r => r.json())
-    .then(d => { if (d.success) location.reload(); });
-}
+// ========== ВЫБОР ЗАДАЧИ ==========
+function selectTask(taskId) {
+    currentTask = taskId;
+    document.querySelectorAll('.task-item').forEach(el => el.classList.remove('active'));
+    document.querySelector('[data-task="' + taskId + '"]').classList.add('active');
 
-// ========== Выбор задачи ==========
-function selectTask(el) {
-    document.querySelectorAll('.task-item').forEach(t => t.classList.remove('active'));
-    el.classList.add('active');
-    currentTask = el.dataset.taskId;
-    const title = el.querySelector('.task-title').textContent;
-    currentTaskData = {id: currentTask, product: title};
+    document.getElementById('formTitle').textContent = 'Задача: ' + taskId.substring(0, 12) + '...';
+    document.getElementById('formContent').style.display = 'block';
 
-    document.getElementById('workArea').style.display = 'block';
-    document.getElementById('emptyWorkArea').style.display = 'none';
-    document.getElementById('taskTitle').textContent = currentTaskData.product;
-    document.getElementById('productInfo').textContent = currentTaskData.product;
-    document.getElementById('taskIdDisplay').textContent = '...' + currentTask.slice(-8);
-    document.getElementById('tortugaLink').href = 'https://new-tortuga.sigma.sbrf.ru/tort/tasks/sales/' + currentTask;
-
-    loadHistory(currentTask);
-    resetForm();
-    loadAIPlan(currentTask);
-}
-
-function resetForm() {
+    // Сброс формы
+    document.getElementById('callStatus').value = 'think';
     document.getElementById('painPoint').value = '';
-    document.getElementById('objectionsSelect').value = '';
-    document.getElementById('objectionsText').value = '';
+    document.getElementById('objection').value = '';
+    document.getElementById('objectionText').value = '';
     document.getElementById('nextStep').value = '';
     document.getElementById('decisionMaker').value = '';
     document.getElementById('nextCallDate').value = '';
-    document.getElementById('nextCallTime').value = '10:00';
+    document.getElementById('nextCallTime').value = '';
     document.getElementById('freeComment').value = '';
     document.getElementById('assembledComment').style.display = 'none';
-    document.getElementById('fraudScore').style.display = 'none';
-    document.getElementById('ropWarning').style.display = 'none';
-    document.getElementById('saveBtn').textContent = '💾 Сохранить звонок';
-    document.getElementById('saveBtn').disabled = false;
-    document.getElementById('saveBtn').className = 'btn btn-success';
-    
-    document.querySelectorAll('.smart-form input, .smart-form select, .smart-form textarea').forEach(el => {
-        el.classList.remove('field-error', 'field-success');
-    });
+    document.getElementById('aiPlan').style.display = 'none';
+
+    onStatusChange();
+    loadHistory(taskId);
 }
 
-// ========== ИИ-АССИСТЕНТ ==========
-function loadAIPlan(taskId) {
-    const aiPlan = document.getElementById('aiPlan');
-    aiPlan.innerHTML = '<div class="ai-loading">Анализирую историю задачи...</div>';
-    
-    fetch('api_call_coach.php', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            mode: 'generate_plan',
-            task_id: taskId,
-            product: currentTaskData?.product || '',
-            history: commentHistory
-        })
-    })
-    .then(r => r.json())
-    .then(d => {
-        if (d.response) {
-            aiPlan.innerHTML = d.response;
-        } else {
-            aiPlan.innerHTML = '<strong>🎯 Микроплан звонка:</strong><br>' +
-                '1. Поздороваться, представиться<br>' +
-                '2. Уточнить, что беспокоит клиента<br>' +
-                '3. Предложить решение (эквайринг Сбер)<br>' +
-                '4. Отработать возражения<br>' +
-                '5. Зафиксировать договорённости<br>' +
-                '6. Назначить следующий контакт';
-        }
-    })
-    .catch(() => {
-        aiPlan.innerHTML = '<strong>🎯 Микроплан звонка:</strong><br>' +
-            '1. Поздороваться, представиться<br>' +
-            '2. Уточнить, что беспокоит клиента<br>' +
-            '3. Предложить решение (эквайринг Сбер)<br>' +
-            '4. Отработать возражения<br>' +
-            '5. Зафиксировать договорённости<br>' +
-            '6. Назначить следующий контакт';
-    });
+// ========== ИЗМЕНЕНИЕ СТАТУСА ==========
+function onStatusChange() {
+    const status = document.getElementById('callStatus').value;
+    const smartFields = document.getElementById('smartFields');
+
+    // Недозвон и Договор — скрываем smart-форму
+    if (status === 'noanswer' || status === 'contract') {
+        smartFields.style.display = 'none';
+    } else {
+        smartFields.style.display = 'block';
+    }
+
+    updateAssembledComment();
 }
 
-// ========== Валидация и сборка комментария ==========
-function validateForm() {
-    let valid = true;
-    const fields = [
-        {id: 'painPoint', name: 'Что беспокоит клиента'},
-        {id: 'objectionsSelect', name: 'Возражения'},
-        {id: 'nextStep', name: 'Что договорились'},
-        {id: 'decisionMaker', name: 'Кто решает'},
-        {id: 'nextCallDate', name: 'Дата следующего контакта'}
-    ];
-    
-    fields.forEach(f => {
-        const el = document.getElementById(f.id);
-        if (!el.value.trim()) {
-            el.classList.add('field-error');
-            el.classList.remove('field-success');
-            valid = false;
-        } else {
-            el.classList.remove('field-error');
-            el.classList.add('field-success');
-        }
-    });
-    
-    return valid;
-}
-
+// ========== СОБРАТЬ КОММЕНТАРИЙ ==========
 function assembleComment() {
+    const status = document.getElementById('callStatus').value;
+    const freeComment = document.getElementById('freeComment').value.trim();
+
+    // Для Недозвона и Договора — только свободный комментарий
+    if (status === 'noanswer' || status === 'contract') {
+        return freeComment || (status === 'noanswer' ? 'Недозвон' : 'Договор заключён');
+    }
+
     const pain = document.getElementById('painPoint').value.trim();
-    const objSel = document.getElementById('objectionsSelect');
-    const objText = document.getElementById('objectionsText').value.trim();
-    const next = document.getElementById('nextStep').value.trim();
-    const dec = document.getElementById('decisionMaker').value.trim();
-    const free = document.getElementById('freeComment').value.trim();
-    
-    const objMap = {
-        'price': 'Дорого / высокая комиссия',
-        'competitor': 'Уже есть / ушёл к конкуренту',
-        'not_now': 'Не нужен сейчас / нет времени',
-        'think': 'Подумаю / обсужу с руководством',
-        'bad_exp': 'Плохой опыт с Сбером',
-        'other': 'Другое'
-    };
-    
-    let comment = `🔴 Проблема клиента: ${pain}\n\n`;
-    comment += `⚠️ Возражение: ${objMap[objSel.value] || '—'}\n`;
-    if (objText) comment += `✅ Отработка: ${objText}\n`;
-    comment += `\n🎯 Договорённости: ${next}\n\n`;
-    comment += `👤 Решает: ${dec}\n`;
-    if (free) comment += `\n📝 Дополнительно: ${free}`;
-    
-    return comment;
+    const objection = document.getElementById('objection').value;
+    const objectionText = document.getElementById('objectionText').value.trim();
+    const nextStep = document.getElementById('nextStep').value.trim();
+    const decision = document.getElementById('decisionMaker').value.trim();
+    const nextDate = document.getElementById('nextCallDate').value;
+    const nextTime = document.getElementById('nextCallTime').value;
+
+    let parts = [];
+    if (pain) parts.push('Проблема: ' + pain);
+    if (objection) parts.push('Возражение: ' + objection + (objectionText ? ' — ' + objectionText : ''));
+    if (nextStep) parts.push('Договорились: ' + nextStep);
+    if (decision) parts.push('Решение: ' + decision);
+    if (nextDate) parts.push('Следующий контакт: ' + nextDate + (nextTime ? ' ' + nextTime : ''));
+    if (freeComment) parts.push('Комментарий: ' + freeComment);
+
+    return parts.join('. ');
 }
 
 function updateAssembledComment() {
     const comment = assembleComment();
-    document.getElementById('commentBody').textContent = comment;
-    document.getElementById('assembledComment').style.display = 'block';
+    if (comment) {
+        document.getElementById('commentText').textContent = comment;
+        document.getElementById('assembledComment').style.display = 'block';
+    } else {
+        document.getElementById('assembledComment').style.display = 'none';
+    }
 }
 
-// ========== Сохранение ==========
-function saveComment() {
-    if (!validateForm()) {
-        alert('Заполните все обязательные поля (отмечены красным)');
-        return;
-    }
-    if (!currentTask) { alert('Выберите задачу'); return; }
-    
+// ========== КОПИРОВАТЬ КОММЕНТАРИЙ ==========
+function copyComment() {
     const comment = assembleComment();
-    
-    const nextCallDate = document.getElementById('nextCallDate').value;
-    const nextCallTime = document.getElementById('nextCallTime').value || '10:00';
-    const nextCall = nextCallDate ? `${nextCallDate} ${nextCallTime}` : null;
-    
-    const saveBtn = document.getElementById('saveBtn');
-    saveBtn.disabled = true;
-    saveBtn.textContent = '⏳ Сохраняю...';
-    
+    if (!comment.trim()) { showToast('Заполните форму'); return; }
+
+    navigator.clipboard.writeText(comment).then(() => {
+        showToast('Скопировано в буфер');
+    });
+}
+
+// ========== СОХРАНИТЬ ЗВОНОК ==========
+function saveCall() {
+    const comment = assembleComment();
+    if (!comment.trim()) { showToast('Заполните форму'); return; }
+
+    const status = document.getElementById('callStatus').value;
+    const nextDate = document.getElementById('nextCallDate').value;
+    const nextTime = document.getElementById('nextCallTime').value;
+    const nextCallDateTime = nextDate ? (nextTime ? nextDate + ' ' + nextTime : nextDate) : '';
+
+    const data = {
+        task_id: currentTask,
+        comment_text: comment,
+        status: status,
+        next_call_date: nextCallDateTime,
+        pain_point: document.getElementById('painPoint').value,
+        objection: document.getElementById('objection').value,
+        objection_text: document.getElementById('objectionText').value,
+        next_step: document.getElementById('nextStep').value,
+        decision_maker: document.getElementById('decisionMaker').value,
+        free_comment: document.getElementById('freeComment').value
+    };
+
     fetch('api_save_call_comment.php', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            task_id: currentTask,
-            comment_text: comment,
-            product: currentTaskData?.product || '',
-            status: 'think',
-            next_call_date: nextCall,
-            pain_point: document.getElementById('painPoint').value.trim(),
-            objection: document.getElementById('objectionsSelect').value,
-            objection_text: document.getElementById('objectionsText').value.trim(),
-            next_step: document.getElementById('nextStep').value.trim(),
-            decision_maker: document.getElementById('decisionMaker').value.trim(),
-            free_comment: document.getElementById('freeComment').value.trim()
-        })
+        body: JSON.stringify(data)
     })
     .then(r => r.json())
     .then(d => {
         if (d.success) {
-            fraudScore = d.fraud_score || 0;
-            showFraudScore(fraudScore, d.rop_control);
-            
-            if (d.rop_control) {
-                document.getElementById('ropWarning').style.display = 'block';
-                saveBtn.textContent = '⚠️ Отправлено на контроль';
-                saveBtn.className = 'btn btn-warning';
-            } else {
-                saveBtn.textContent = '✅ Сохранено';
-                saveBtn.className = 'btn btn-success';
+            // Копируем в буфер
+            navigator.clipboard.writeText(comment).then(() => {
+                showToast('Сохранено и скопировано. Фрод-скор: ' + d.fraud_score);
+            });
+
+            // Обновляем список задач без перезагрузки
+            updateTaskInList(currentTask, d.new_status, d.call_count);
+
+            // Если задача завершена — убираем из списка
+            if (d.new_status === 'Договор заключён' || d.new_status === 'Отказ подтверждён') {
+                removeTaskFromList(currentTask);
+                document.getElementById('formContent').style.display = 'none';
+                document.getElementById('formTitle').textContent = 'Выберите задачу';
+                currentTask = null;
             }
-            
+
             loadHistory(currentTask);
-            
-            if (d.next_call_date) {
-                setTimeout(() => location.reload(), 10000);
-            }
         } else {
-            alert('Ошибка: ' + d.error);
-            saveBtn.disabled = false;
-            saveBtn.textContent = '💾 Сохранить звонок';
+            showToast('Ошибка: ' + (d.error || 'Неизвестная ошибка'));
         }
     })
-    .catch(e => {
-        alert('Ошибка соединения');
-        saveBtn.disabled = false;
-        saveBtn.textContent = '💾 Сохранить звонок';
+    .catch(err => showToast('Ошибка сети: ' + err));
+}
+
+// ========== ОБНОВИТЬ ЗАДАЧУ В СПИСКЕ (без перезагрузки) ==========
+function updateTaskInList(taskId, newStatus, callCount) {
+    const taskEl = document.querySelector('[data-task="' + taskId + '"]');
+    if (!taskEl) return;
+
+    // Обновляем счётчик звонков
+    let callsBadge = taskEl.querySelector('.task-calls');
+    if (!callsBadge && callCount > 0) {
+        callsBadge = document.createElement('span');
+        callsBadge.className = 'task-calls';
+        taskEl.querySelector('.task-num').after(callsBadge);
+    }
+    if (callsBadge) callsBadge.textContent = '(' + callCount + ' зв.)';
+
+    // Обновляем статус
+    const statusBadge = taskEl.querySelector('.status-badge');
+    const statusMap = {
+        'Назначена': {text: 'Новая', cls: 'status-new'},
+        'Подтверждена': {text: 'Подтверждена', cls: 'status-confirmed'},
+        'На контроле РОП': {text: 'На контроле', cls: 'status-rop'},
+        'Думает': {text: 'Думает', cls: 'status-think'},
+        'Недозвон': {text: 'Недозвон', cls: 'status-noanswer'}
+    };
+    const s = statusMap[newStatus] || {text: newStatus, cls: 'status-new'};
+    statusBadge.textContent = s.text;
+    statusBadge.className = 'status-badge ' + s.cls;
+}
+
+function removeTaskFromList(taskId) {
+    const taskEl = document.querySelector('[data-task="' + taskId + '"]');
+    if (taskEl) taskEl.remove();
+}
+
+// ========== УДАЛИТЬ ЗАДАЧУ ==========
+function deleteTask(taskId) {
+    if (!confirm('Удалить задачу?')) return;
+
+    fetch('api_clear_tasks.php', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({task_ids: [taskId]})
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.success) {
+            removeTaskFromList(taskId);
+            showToast('Задача удалена');
+            if (currentTask === taskId) {
+                document.getElementById('formContent').style.display = 'none';
+                document.getElementById('formTitle').textContent = 'Выберите задачу';
+                currentTask = null;
+            }
+        } else {
+            showToast('Ошибка: ' + (d.error || 'Не удалось удалить'));
+        }
     });
 }
 
-function showFraudScore(score, ropControl) {
-    const el = document.getElementById('fraudScore');
-    let html = '';
-    
-    if (score >= 70) {
-        html = `<div class="fraud-score green">
-            <div class="score-circle">${score}</div>
-            <div class="score-text"><strong>✅ Звонок верифицирован</strong>Система подтвердила достоверность</div>
-        </div>`;
-    } else if (score >= 40) {
-        html = `<div class="fraud-score yellow">
-            <div class="score-circle">${score}</div>
-            <div class="score-text"><strong>⚠️ Требует внимания</strong>Некоторые поля заполнены слабо</div>
-        </div>`;
-    } else {
-        html = `<div class="fraud-score red">
-            <div class="score-circle">${score}</div>
-            <div class="score-text"><strong>🚨 Подозрение на фрод</strong>Звонок отправлен руководителю на проверку</div>
-        </div>`;
-    }
-    
-    el.innerHTML = html;
-    el.style.display = 'block';
-}
-
-// ========== История ==========
+// ========== ЗАГРУЗИТЬ ИСТОРИЮ ==========
 function loadHistory(taskId) {
     fetch('api_call_history.php?task_id=' + encodeURIComponent(taskId))
     .then(r => r.json())
@@ -682,18 +496,23 @@ function loadHistory(taskId) {
         commentHistory = d.history || [];
         const list = document.getElementById('historyList');
         const section = document.getElementById('historySection');
-        
+
         if (commentHistory.length > 0) {
             section.style.display = 'block';
             list.innerHTML = commentHistory.map(h => {
                 const statusClass = h.call_result || 'think';
-                const statusText = {think:'🤔 Думает', signed:'✅ Подписан', reject:'❌ Отказ', nocontact:'📵 Нет контакта', recall:'📞 Перезвон', '':'📝'}[h.call_result] || h.call_result;
-                return `<div class="history-entry">
-                    <div class="h-date">${h.created_at}</div>
-                    <span class="h-status ${statusClass}">${statusText}</span>
-                    <div>${h.comment_text.substring(0, 200)}${h.comment_text.length > 200 ? '...' : ''}</div>
-                    ${h.next_call_date ? `<div style="font-size:0.7rem; color:#1a73e8; margin-top:2px;">📅 След. контакт: ${h.next_call_date}</div>` : ''}
-                </div>`;
+                const statusMap = {
+                    think: 'Думает', signed: 'Подписан', reject: 'Отказ', 
+                    nocontact: 'Нет контакта', recall: 'Перезвон',
+                    noanswer: 'Недозвон', contract: 'Договор'
+                };
+                const statusText = statusMap[h.call_result] || h.call_result;
+                return '<div class="history-entry">' +
+                    '<div class="h-date">' + h.created_at + ' (Звонок #' + (h.call_count || '?') + ')</div>' +
+                    '<span class="h-status ' + statusClass + '">' + statusText + '</span>' +
+                    '<div>' + (h.comment_text ? h.comment_text.substring(0, 200) + (h.comment_text.length > 200 ? '...' : '') : '') + '</div>' +
+                    (h.next_call_date ? '<div style="font-size:0.7rem; color:#1a73e8; margin-top:2px;">След. контакт: ' + h.next_call_date + '</div>' : '') +
+                    '</div>';
             }).join('');
         } else {
             section.style.display = 'none';
@@ -701,25 +520,56 @@ function loadHistory(taskId) {
     });
 }
 
-// ========== Копировать и перейти ==========
+// ========== КОПИРОВАТЬ И ПЕРЕЙТИ ==========
 function copyAndGo() {
     const comment = assembleComment();
-    if (!comment.trim()) { alert('Заполните форму'); return; }
-    
+    if (!comment.trim()) { showToast('Заполните форму'); return; }
+
     navigator.clipboard.writeText(comment).then(() => {
-        const toast = document.getElementById('copyToast');
-        toast.classList.add('show');
-        setTimeout(() => toast.classList.remove('show'), 3000);
+        showToast('Скопировано');
         setTimeout(() => window.open('https://new-tortuga.sigma.sbrf.ru/tort/tasks/sales/' + currentTask, '_blank'), 500);
     });
 }
 
-// ========== Обновление сборного комментария при вводе ==========
+// ========== МИКРОПЛАН ==========
+function getPlan() {
+    const btn = event.target;
+    btn.textContent = 'Загрузка...';
+
+    fetch('api_call_coach.php', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            mode: 'generate_plan',
+            task_id: currentTask,
+            history: commentHistory
+        })
+    })
+    .then(r => r.json())
+    .then(d => {
+        btn.textContent = 'Получить микроплан';
+        const box = document.getElementById('aiPlan');
+        box.innerHTML = d.response || 'Нет данных';
+        box.style.display = 'block';
+    })
+    .catch(() => {
+        btn.textContent = 'Получить микроплан';
+        showToast('Ошибка загрузки плана');
+    });
+}
+
+// ========== TOAST ==========
+function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// ========== ОБНОВЛЕНИЕ СБОРНОГО КОММЕНТАРИЯ ==========
 document.querySelectorAll('.smart-form input, .smart-form select, .smart-form textarea').forEach(el => {
     el.addEventListener('input', updateAssembledComment);
 });
 </script>
 </body>
 </html>
-PHPEOF
-echo "calls.php создан (без ПДН)"

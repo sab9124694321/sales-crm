@@ -35,42 +35,75 @@ function getCallPlan($pdo, $tabel_num) {
     return ceil($month_plan / $work_days);
 }
 
-// --- Функция получения статистики сотрудника ---
+// --- Функция получения статистики сотрудника (v2.1) ---
 function getEmployeeStats($pdo, $emp_id, $emp_tabel, $date_from, $date_to) {
     $daily_plan = getCallPlan($pdo, $emp_tabel);
 
+    // Всего задач
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM epk_tasks WHERE user_tabel = ?");
     $stmt->execute([$emp_tabel]);
     $total_tasks = (int)$stmt->fetchColumn();
 
+    // Звонки из daily_reports
     $stmt = $pdo->prepare("SELECT COALESCE(SUM(calls),0) FROM daily_reports WHERE user_id = ? AND report_date BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $calls_done = (int)$stmt->fetchColumn();
 
+    // Статистика из call_comments (новое в v2.1)
+    $stmt = $pdo->prepare("
+        SELECT 
+            COUNT(*) as total_call_comments,
+            SUM(CASE WHEN call_result = 'contract' THEN 1 ELSE 0 END) as contracts,
+            SUM(CASE WHEN call_result = 'reject' THEN 1 ELSE 0 END) as rejects,
+            SUM(CASE WHEN call_result = 'think' THEN 1 ELSE 0 END) as thinks,
+            SUM(CASE WHEN call_result = 'noanswer' THEN 1 ELSE 0 END) as noanswers,
+            SUM(CASE WHEN call_result = 'signed' THEN 1 ELSE 0 END) as signed_count
+        FROM call_comments 
+        WHERE user_id = ? AND date(created_at) BETWEEN ? AND ?
+    ");
+    $stmt->execute([$emp_id, $date_from, $date_to]);
+    $call_stats = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    // На контроле
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND date(created_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $on_control = (int)$stmt->fetchColumn();
 
+    // Подтверждено
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND status = 'Подтверждено' AND date(checked_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $confirmed = (int)$stmt->fetchColumn();
 
+    // Отклонено
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND status = 'Отклонено' AND date(checked_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $rejected = (int)$stmt->fetchColumn();
 
+    // Перепрозвон
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND status = 'Перепрозвон' AND date(checked_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $recall = (int)$stmt->fetchColumn();
+
+    // Отказ подтверждён (новое в v2.1)
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND status = 'Отказ подтверждён' AND date(checked_at) BETWEEN ? AND ?");
+    $stmt->execute([$emp_id, $date_from, $date_to]);
+    $reject_confirmed = (int)$stmt->fetchColumn();
 
     return [
         'daily_plan' => $daily_plan,
         'total_tasks' => $total_tasks,
         'calls_done' => $calls_done,
+        'total_calls' => (int)($call_stats['total_call_comments'] ?? 0),
+        'contracts' => (int)($call_stats['contracts'] ?? 0),
+        'rejects' => (int)($call_stats['rejects'] ?? 0),
+        'thinks' => (int)($call_stats['thinks'] ?? 0),
+        'noanswers' => (int)($call_stats['noanswers'] ?? 0),
+        'signed_count' => (int)($call_stats['signed_count'] ?? 0),
         'on_control' => $on_control,
         'confirmed' => $confirmed,
         'rejected' => $rejected,
-        'recall' => $recall
+        'recall' => $recall,
+        'reject_confirmed' => $reject_confirmed
     ];
 }
 
@@ -100,57 +133,60 @@ if ($is_manager) {
         ];
     }
 } elseif ($is_terman) {
-    $stmt = $pdo->query("SELECT id, name FROM territories WHERE name IS NOT NULL AND name != '' ORDER BY name");
-    $territories_list = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $stmt = $pdo->query("SELECT id, name FROM territories WHERE name IS NOT NULL ORDER BY name");
+    $territories = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    foreach ($territories_list as $territory) {
-        $stmt = $pdo->prepare("SELECT id, full_name, tabel_number, territory_id FROM users WHERE is_active = 1 AND role IN ('head', 'territory_head') AND territory_id = ? ORDER BY full_name");
+    foreach ($territories as $territory) {
+        $territory_heads = [];
+        $stmt = $pdo->prepare("SELECT id, full_name, tabel_number FROM users WHERE is_active = 1 AND role IN ('head', 'mmb_tp_head') AND territory_id = ? ORDER BY full_name");
         $stmt->execute([$territory['id']]);
-        $territory_heads = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $territory_head_list = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        $territory_heads_data = [];
-        $territory_totals = ['daily_plan'=>0, 'total_tasks'=>0, 'calls_done'=>0, 'on_control'=>0, 'confirmed'=>0, 'rejected'=>0, 'recall'=>0];
-
-        foreach ($territory_heads as $head) {
-            $head_stats = getEmployeeStats($pdo, $head['id'], $head['tabel_number'], $filter_date_from, $filter_date_to);
-
+        foreach ($territory_head_list as $head) {
+            $team_members = [];
             $stmt = $pdo->prepare("SELECT id, full_name, tabel_number FROM users WHERE is_active = 1 AND role IN ('manager', 'mmb_manager', 'ubr_middle') AND manager_id = ? ORDER BY full_name");
             $stmt->execute([$head['id']]);
             $team = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-            $team_members = [];
-            $team_totals = ['daily_plan'=>0, 'total_tasks'=>0, 'calls_done'=>0, 'on_control'=>0, 'confirmed'=>0, 'rejected'=>0, 'recall'=>0];
-
             foreach ($team as $member) {
-                $member_stats = getEmployeeStats($pdo, $member['id'], $member['tabel_number'], $filter_date_from, $filter_date_to);
                 $team_members[] = [
                     'id' => $member['id'],
                     'tabel' => $member['tabel_number'],
                     'name' => $member['full_name'],
-                    'stats' => $member_stats
+                    'stats' => getEmployeeStats($pdo, $member['id'], $member['tabel_number'], $filter_date_from, $filter_date_to)
                 ];
-                $team_totals['daily_plan'] += $member_stats['daily_plan'];
-                $team_totals['total_tasks'] += $member_stats['total_tasks'];
-                $team_totals['calls_done'] += $member_stats['calls_done'];
-                $team_totals['on_control'] += $member_stats['on_control'];
-                $team_totals['confirmed'] += $member_stats['confirmed'];
-                $team_totals['rejected'] += $member_stats['rejected'];
-                $team_totals['recall'] += $member_stats['recall'];
             }
 
-            $territory_totals['daily_plan'] += $head_stats['daily_plan'] + $team_totals['daily_plan'];
-            $territory_totals['total_tasks'] += $head_stats['total_tasks'] + $team_totals['total_tasks'];
-            $territory_totals['calls_done'] += $head_stats['calls_done'] + $team_totals['calls_done'];
-            $territory_totals['on_control'] += $head_stats['on_control'] + $team_totals['on_control'];
-            $territory_totals['confirmed'] += $head_stats['confirmed'] + $team_totals['confirmed'];
-            $territory_totals['rejected'] += $head_stats['rejected'] + $team_totals['rejected'];
-            $territory_totals['recall'] += $head_stats['recall'] + $team_totals['recall'];
+            // Суммы по команде
+            $team_totals = [
+                'daily_plan' => 0, 'total_tasks' => 0, 'calls_done' => 0,
+                'total_calls' => 0, 'contracts' => 0, 'rejects' => 0, 'thinks' => 0,
+                'noanswers' => 0, 'signed_count' => 0,
+                'on_control' => 0, 'confirmed' => 0, 'rejected' => 0, 'recall' => 0,
+                'reject_confirmed' => 0
+            ];
+            foreach ($team_members as $m) {
+                $s = $m['stats'];
+                $team_totals['daily_plan'] += $s['daily_plan'];
+                $team_totals['total_tasks'] += $s['total_tasks'];
+                $team_totals['calls_done'] += $s['calls_done'];
+                $team_totals['total_calls'] += $s['total_calls'];
+                $team_totals['contracts'] += $s['contracts'];
+                $team_totals['rejects'] += $s['rejects'];
+                $team_totals['thinks'] += $s['thinks'];
+                $team_totals['noanswers'] += $s['noanswers'];
+                $team_totals['signed_count'] += $s['signed_count'];
+                $team_totals['on_control'] += $s['on_control'];
+                $team_totals['confirmed'] += $s['confirmed'];
+                $team_totals['rejected'] += $s['rejected'];
+                $team_totals['recall'] += $s['recall'];
+                $team_totals['reject_confirmed'] += $s['reject_confirmed'];
+            }
 
-            $territory_heads_data[] = [
+            $territory_heads[] = [
                 'id' => $head['id'],
-                'tabel' => $head['tabel_number'],
                 'name' => $head['full_name'],
-                'stats' => $head_stats,
+                'tabel' => $head['tabel_number'],
                 'team' => $team_members,
                 'team_totals' => $team_totals
             ];
@@ -159,485 +195,338 @@ if ($is_manager) {
         $territories_data[] = [
             'id' => $territory['id'],
             'name' => $territory['name'],
-            'heads' => $territory_heads_data,
-            'totals' => $territory_totals
+            'heads' => $territory_heads
         ];
     }
 }
 
-// --- Загрузка задач на контроле (для руководителей) ---
+// --- Итоги (для head) ---
+$totals = null;
+if ($is_head && !empty($employees)) {
+    $totals = [
+        'daily_plan' => 0, 'total_tasks' => 0, 'calls_done' => 0,
+        'total_calls' => 0, 'contracts' => 0, 'rejects' => 0, 'thinks' => 0,
+        'noanswers' => 0, 'signed_count' => 0,
+        'on_control' => 0, 'confirmed' => 0, 'rejected' => 0, 'recall' => 0,
+        'reject_confirmed' => 0
+    ];
+    foreach ($employees as $e) {
+        $s = $e['stats'];
+        $totals['daily_plan'] += $s['daily_plan'];
+        $totals['total_tasks'] += $s['total_tasks'];
+        $totals['calls_done'] += $s['calls_done'];
+        $totals['total_calls'] += $s['total_calls'];
+        $totals['contracts'] += $s['contracts'];
+        $totals['rejects'] += $s['rejects'];
+        $totals['thinks'] += $s['thinks'];
+        $totals['noanswers'] += $s['noanswers'];
+        $totals['signed_count'] += $s['signed_count'];
+        $totals['on_control'] += $s['on_control'];
+        $totals['confirmed'] += $s['confirmed'];
+        $totals['rejected'] += $s['rejected'];
+        $totals['recall'] += $s['recall'];
+        $totals['reject_confirmed'] += $s['reject_confirmed'];
+    }
+}
+
+// --- Задачи на контроле ---
 $control_tasks = [];
-$status_counts = [
-    'На проверке' => 0,
-    'Подтверждено' => 0,
-    'Отклонено' => 0,
-    'Перепрозвон' => 0
-];
-
 if ($is_head) {
-    $tasks_sql = "
-        SELECT 
-            r.id as control_id,
-            r.task_id,
-            r.fraud_score,
-            r.comment_text,
-            r.status as control_status,
-            r.rop_comment,
-            r.rop_action,
-            r.created_at,
-            r.checked_at,
-            u.full_name as manager_name,
-            u.tabel_number as manager_tabel,
-            COALESCE(t.name, '—') as territory_name,
-            (SELECT COUNT(*) FROM call_comments WHERE task_id = r.task_id) as call_count,
-            (SELECT MAX(created_at) FROM call_comments WHERE task_id = r.task_id) as last_call_date
-        FROM rop_control_queue r
-        JOIN users u ON r.user_id = u.id
-        LEFT JOIN territories t ON u.territory_id = t.id
-        WHERE date(r.created_at) BETWEEN ? AND ?
+    $team_ids = array_column($employees, 'id');
+    if (!empty($team_ids)) {
+        $placeholders = implode(',', array_fill(0, count($team_ids), '?'));
+        $sql = "
+            SELECT rcq.*, u.full_name as manager_name, t.name as territory_name
+            FROM rop_control_queue rcq
+            LEFT JOIN users u ON rcq.user_id = u.id
+            LEFT JOIN users mgr ON u.manager_id = mgr.id
+            LEFT JOIN territories t ON mgr.territory_id = t.id
+            WHERE rcq.user_id IN ($placeholders)
+        ";
+        $params = $team_ids;
+        if ($filter_status !== 'Все') {
+            $sql .= " AND rcq.status = ?";
+            $params[] = $filter_status;
+        }
+        $sql .= " ORDER BY rcq.created_at DESC";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $control_tasks = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+} elseif ($role === 'admin') {
+    $sql = "
+        SELECT rcq.*, u.full_name as manager_name, t.name as territory_name
+        FROM rop_control_queue rcq
+        LEFT JOIN users u ON rcq.user_id = u.id
+        LEFT JOIN users mgr ON u.manager_id = mgr.id
+        LEFT JOIN territories t ON mgr.territory_id = t.id
+        WHERE 1=1
     ";
-    $tasks_params = [$filter_date_from, $filter_date_to];
-
-    if ($filter_status) {
-        $tasks_sql .= " AND r.status = ?";
-        $tasks_params[] = $filter_status;
+    $params = [];
+    if ($filter_status !== 'Все') {
+        $sql .= " AND rcq.status = ?";
+        $params[] = $filter_status;
     }
-
-    if ($role !== 'admin') {
-        $tasks_sql .= " AND u.manager_id = ?";
-        $tasks_params[] = $user_id;
-    }
-
-    $tasks_sql .= " ORDER BY r.created_at DESC LIMIT 200";
-
-    $stmt = $pdo->prepare($tasks_sql);
-    $stmt->execute($tasks_params);
+    $sql .= " ORDER BY rcq.created_at DESC";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
     $control_tasks = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-    foreach ($control_tasks as $t) {
-        if (isset($status_counts[$t['control_status']])) {
-            $status_counts[$t['control_status']]++;
-        }
-    }
 }
 
-// --- Выгрузка CSV статистики ---
-if (isset($_GET['export']) && $_GET['export'] === 'csv') {
+// --- CSV выгрузка задач (v2.1: добавлен top_status) ---
+if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin')) {
     header('Content-Type: text/csv; charset=utf-8');
-    header('Content-Disposition: attachment; filename="control_stats_' . date('Ymd') . '.csv"');
+    header('Content-Disposition: attachment; filename=tasks_' . date('Y-m-d') . '.csv');
     $output = fopen('php://output', 'w');
-    fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
+    fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF)); // BOM
 
-    fputcsv($output, ['Сотрудник', 'Табель', 'План/день', 'Задач всего', 'Звонков', 'На контроле', 'Подтверждено', 'Отклонено', 'Перепрозвон']);
+    fputcsv($output, ['ID', 'Задача', 'Менеджер', 'Территория', 'Фрод-скор', 'Статус РОП', 'Верхнеуровневый статус', 'Комментарий', 'Комментарий РОП', 'Дата создания', 'Дата проверки']);
 
-    if ($is_terman) {
-        foreach ($territories_data as $territory) {
-            fputcsv($output, ['=== ТЕРРИТОРИЯ: ' . $territory['name'] . ' ===', '', '', '', '', '', '', '', '']);
-            foreach ($territory['heads'] as $head) {
-                fputcsv($output, ['-- ' . $head['name'] . ' --', '', '', '', '', '', '', '', '']);
-                foreach ($head['team'] as $emp) {
-                    fputcsv($output, [
-                        $emp['name'], $emp['tabel'], $emp['stats']['daily_plan'], $emp['stats']['total_tasks'],
-                        $emp['stats']['calls_done'], $emp['stats']['on_control'], $emp['stats']['confirmed'],
-                        $emp['stats']['rejected'], $emp['stats']['recall']
-                    ]);
-                }
-                fputcsv($output, ['ИТОГО КОМАНДЫ', '', $head['team_totals']['daily_plan'], $head['team_totals']['total_tasks'], $head['team_totals']['calls_done'], $head['team_totals']['on_control'], $head['team_totals']['confirmed'], $head['team_totals']['rejected'], $head['team_totals']['recall']]);
-            }
-            fputcsv($output, ['ИТОГО ТЕРРИТОРИИ', '', $territory['totals']['daily_plan'], $territory['totals']['total_tasks'], $territory['totals']['calls_done'], $territory['totals']['on_control'], $territory['totals']['confirmed'], $territory['totals']['rejected'], $territory['totals']['recall']]);
-        }
-    } elseif ($is_head) {
-        foreach ($employees as $emp) {
-            fputcsv($output, [
-                $emp['name'], $emp['tabel'], $emp['stats']['daily_plan'], $emp['stats']['total_tasks'],
-                $emp['stats']['calls_done'], $emp['stats']['on_control'], $emp['stats']['confirmed'],
-                $emp['stats']['rejected'], $emp['stats']['recall']
-            ]);
-        }
-    } else {
-        foreach ($employees as $emp) {
-            fputcsv($output, [
-                $emp['name'], $emp['tabel'], $emp['stats']['daily_plan'], $emp['stats']['total_tasks'],
-                $emp['stats']['calls_done'], $emp['stats']['on_control'], $emp['stats']['confirmed'],
-                $emp['stats']['rejected'], $emp['stats']['recall']
-            ]);
-        }
-    }
-    fclose($output);
-    exit;
-}
-
-// --- Выгрузка CSV задач с комментариями ---
-if (isset($_GET['export']) && $_GET['export'] === 'csv_tasks') {
-    header('Content-Type: text/csv; charset=utf-8');
-    header('Content-Disposition: attachment; filename="tasks_comments_' . date('Ymd') . '.csv"');
-    $output = fopen('php://output', 'w');
-    fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
-
-    fputcsv($output, ['Номер задачи', 'Менеджер', 'Статус задачи', 'Статус звонка', 'Комментарий', 'Дата']);
-
-    $task_sql = "
-        SELECT 
-            e.task_id,
-            u.full_name as manager_name,
-            e.status as task_status,
-            COALESCE(c.call_result, 'Нет звонка') as call_status,
-            COALESCE(c.comment_text, '') as comment_text,
-            COALESCE(c.created_at, e.imported_at) as date
-        FROM epk_tasks e
-        JOIN users u ON e.user_tabel = u.tabel_number
-        LEFT JOIN call_comments c ON e.task_id = c.task_id
-        WHERE date(e.imported_at) BETWEEN ? AND ?
-        ORDER BY e.imported_at DESC
-    ";
-    $task_params = [$filter_date_from, $filter_date_to];
-
-    if ($is_manager) {
-        $task_sql = "
-            SELECT 
-                e.task_id,
-                u.full_name as manager_name,
-                e.status as task_status,
-                COALESCE(c.call_result, 'Нет звонка') as call_status,
-                COALESCE(c.comment_text, '') as comment_text,
-                COALESCE(c.created_at, e.imported_at) as date
-            FROM epk_tasks e
-            JOIN users u ON e.user_tabel = u.tabel_number
-            LEFT JOIN call_comments c ON e.task_id = c.task_id
-            WHERE e.user_tabel = ? AND date(e.imported_at) BETWEEN ? AND ?
-            ORDER BY e.imported_at DESC
-        ";
-        $task_params = [$tabel, $filter_date_from, $filter_date_to];
-    } elseif ($is_head) {
-        $task_sql = "
-            SELECT 
-                e.task_id,
-                u.full_name as manager_name,
-                e.status as task_status,
-                COALESCE(c.call_result, 'Нет звонка') as call_status,
-                COALESCE(c.comment_text, '') as comment_text,
-                COALESCE(c.created_at, e.imported_at) as date
-            FROM epk_tasks e
-            JOIN users u ON e.user_tabel = u.tabel_number
-            LEFT JOIN call_comments c ON e.task_id = c.task_id
-            WHERE u.manager_id = ? AND date(e.imported_at) BETWEEN ? AND ?
-            ORDER BY e.imported_at DESC
-        ";
-        $task_params = [$user_id, $filter_date_from, $filter_date_to];
-    } elseif ($is_terman) {
-        $task_sql = "
-            SELECT 
-                e.task_id,
-                u.full_name as manager_name,
-                e.status as task_status,
-                COALESCE(c.call_result, 'Нет звонка') as call_status,
-                COALESCE(c.comment_text, '') as comment_text,
-                COALESCE(c.created_at, e.imported_at) as date
-            FROM epk_tasks e
-            JOIN users u ON e.user_tabel = u.tabel_number
-            LEFT JOIN call_comments c ON e.task_id = c.task_id
-            WHERE date(e.imported_at) BETWEEN ? AND ?
-            ORDER BY e.imported_at DESC
-        ";
-        $task_params = [$filter_date_from, $filter_date_to];
-    }
-
-    $stmt = $pdo->prepare($task_sql);
-    $stmt->execute($task_params);
-
-    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+    foreach ($control_tasks as $task) {
         fputcsv($output, [
-            $row['task_id'],
-            $row['manager_name'],
-            $row['task_status'],
-            $row['call_status'],
-            mb_substr($row['comment_text'], 0, 500),
-            $row['date']
+            $task['id'],
+            $task['task_id'],
+            $task['manager_name'] ?? '',
+            $task['territory_name'] ?? '',
+            $task['fraud_score'],
+            $task['status'],
+            $task['top_status'] ?? 'active',
+            $task['comment_text'],
+            $task['rop_comment'] ?? '',
+            $task['created_at'],
+            $task['checked_at'] ?? ''
         ]);
     }
-
     fclose($output);
     exit;
 }
 
-// --- Список территорий для фильтра ---
-$stmt = $pdo->query("SELECT DISTINCT name FROM territories WHERE name IS NOT NULL AND name != '' ORDER BY name");
-$territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
+// --- CSV выгрузка статистики ---
+if (isset($_GET['export_stats']) && ($is_head || $role === 'admin')) {
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename=stats_' . date('Y-m-d') . '.csv');
+    $output = fopen('php://output', 'w');
+    fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
+
+    fputcsv($output, ['Сотрудник', 'Табель', 'План/день', 'Задачи', 'Звонки (отчёты)', 'Звонки (модуль)', 'Договоры', 'Отказы', 'Думает', 'Недозвоны', 'Подписания', 'На контроле', 'Подтверждено', 'Отклонено', 'Перепрозвон', 'Отказ подтверждён']);
+
+    if ($is_head) {
+        foreach ($employees as $emp) {
+            $s = $emp['stats'];
+            fputcsv($output, [
+                $emp['name'], $emp['tabel'], $s['daily_plan'], $s['total_tasks'],
+                $s['calls_done'], $s['total_calls'], $s['contracts'], $s['rejects'],
+                $s['thinks'], $s['noanswers'], $s['signed_count'],
+                $s['on_control'], $s['confirmed'], $s['rejected'], $s['recall'],
+                $s['reject_confirmed']
+            ]);
+        }
+        if ($totals) {
+            fputcsv($output, [
+                'ИТОГО', '', $totals['daily_plan'], $totals['total_tasks'],
+                $totals['calls_done'], $totals['total_calls'], $totals['contracts'], $totals['rejects'],
+                $totals['thinks'], $totals['noanswers'], $totals['signed_count'],
+                $totals['on_control'], $totals['confirmed'], $totals['rejected'], $totals['recall'],
+                $totals['reject_confirmed']
+            ]);
+        }
+    }
+    fclose($output);
+    exit;
+}
 ?>
 <!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>🛡️ Контроль звонков — SZB CRM</title>
+    <title>Контроль — SZB CRM</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
         body { background:#f0f2f5; font-family:system-ui, -apple-system, sans-serif; padding:12px; }
         .container { max-width:1400px; margin:0 auto; }
-        .nav { display:flex; align-items:center; padding:12px 20px; background:linear-gradient(135deg,#1a1a2e,#16213e); color:#fff; border-radius:16px; margin-bottom:20px; gap:12px; flex-wrap:wrap; }
-        .nav a { color:#ccc; text-decoration:none; padding:8px 14px; border-radius:8px; font-size:13px; font-weight:500; }
-        .nav a:hover, .nav a.active { background:rgba(255,255,255,0.1); color:#fff; }
-        .nav .logo { font-size:20px; font-weight:700; color:#fff; margin-right:auto; }
-        .nav .user { margin-left:auto; color:#aaa; font-size:13px; }
-
-        .stats-bar { display:grid; grid-template-columns:repeat(auto-fit, minmax(160px,1fr)); gap:12px; margin-bottom:20px; }
-        .stat-card { background:#fff; border-radius:16px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05); text-align:center; }
-        .stat-card .value { font-size:2rem; font-weight:800; }
-        .stat-card .label { font-size:0.8rem; color:#666; }
-        .stat-card.plan { border-left:4px solid #1a73e8; }
-        .stat-card.done { border-left:4px solid #28a745; }
-        .stat-card.control { border-left:4px solid #dc3545; }
-        .stat-card.pending { border-left:4px solid #ffc107; }
-
-        .card { background:#fff; border-radius:16px; padding:20px; box-shadow:0 1px 3px rgba(0,0,0,0.05); margin-bottom:16px; }
-        .card h3 { margin-bottom:16px; font-size:1.1rem; display:flex; align-items:center; gap:8px; }
-
-        .filters { display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap; align-items:end; }
-        .filters label { font-size:0.8rem; font-weight:600; color:#555; display:block; margin-bottom:4px; }
-        .filters input, .filters select { padding:8px 12px; border:1px solid #ddd; border-radius:8px; font-size:0.85rem; }
-        .filters button, .filters a { padding:8px 16px; border:none; border-radius:8px; font-size:0.85rem; cursor:pointer; font-weight:600; text-decoration:none; display:inline-block; }
-        .btn-primary { background:#1a73e8; color:#fff; }
-        .btn-outline { background:#fff; color:#1a73e8; border:1px solid #1a73e8; }
-
-        .tb-table { width:100%; border-collapse:collapse; font-size:0.85rem; }
-        .tb-table th { background:#f8f9fa; padding:10px; text-align:left; font-weight:600; color:#555; border-bottom:2px solid #e0e0e0; }
-        .tb-table td { padding:10px; border-bottom:1px solid #eee; }
-        .tb-table tr:hover { background:#f8f9fa; }
-        .tb-table .total-row { font-weight:bold; background:#f0f0f0; }
-
-        .score-badge { padding:4px 12px; border-radius:20px; font-weight:700; font-size:0.85rem; color:#fff; }
-        .score-high { background:#28a745; }
-        .score-mid { background:#ffc107; color:#333; }
-        .score-low { background:#dc3545; }
-
-        .head-section { margin-bottom:24px; }
-        .head-title { font-size:1.1rem; font-weight:600; color:#1a1a2e; margin-bottom:12px; padding:8px 12px; background:#e8f0fe; border-radius:8px; }
-        .territory-title { font-size:1.2rem; font-weight:700; color:#1a1a2e; margin-bottom:16px; padding:12px 16px; background:#d2e3fc; border-radius:8px; display:flex; justify-content:space-between; align-items:center; }
-
-        .toggle-btn { background:none; border:none; color:#1a73e8; cursor:pointer; font-size:0.85rem; margin-left:8px; }
-        .team-table { margin-left:20px; margin-top:8px; display:none; }
-        .team-table.show { display:table; }
-        .heads-table { margin-left:20px; margin-top:8px; display:none; }
-        .heads-table.show { display:table; }
-
-        .empty-state { text-align:center; padding:40px; color:#888; }
-
-        /* Стили для блока контроля */
-        .status-badge { padding:4px 10px; border-radius:8px; font-size:0.75rem; font-weight:600; }
-        .status-pending { background:#fff3e0; color:#856404; }
-        .status-confirmed { background:#e8f5e9; color:#2e7d32; }
-        .status-rejected { background:#ffebee; color:#c62828; }
-        .status-recall { background:#e3f2fd; color:#1565c0; }
-
-        .task-item { border:1px solid #e8ecf1; border-radius:12px; padding:16px; margin-bottom:12px; transition:all 0.2s; }
-        .task-item:hover { box-shadow:0 2px 8px rgba(0,0,0,0.08); }
-        .task-header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px; flex-wrap:wrap; gap:8px; }
-        .task-meta { display:flex; gap:12px; flex-wrap:wrap; font-size:0.8rem; color:#666; }
-        .task-meta span { display:flex; align-items:center; gap:4px; }
-        .comment-preview { background:#f8f9fa; border-radius:8px; padding:12px; font-size:0.85rem; line-height:1.5; margin:10px 0; max-height:120px; overflow-y:auto; }
-        .actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
-        .actions button { padding:6px 14px; border:none; border-radius:8px; font-size:0.8rem; cursor:pointer; font-weight:600; }
-        .btn-confirm { background:#28a745; color:#fff; }
-        .btn-reject { background:#dc3545; color:#fff; }
-        .btn-recall { background:#1a73e8; color:#fff; }
-        .rop-comment { width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; font-size:0.85rem; margin-top:8px; }
-        .rop-comment.hidden { display:none; }
+        .nav { display:flex; align-items:center; padding:12px 20px; background:#fff; border-radius:12px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,0.1); }
+        .nav a { color:#1a73e8; text-decoration:none; font-weight:500; margin-right:20px; }
+        .nav a:hover { text-decoration:underline; }
+        .panel { background:#fff; border-radius:12px; padding:16px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,0.1); }
+        .panel h3 { margin-bottom:12px; font-size:1rem; color:#202124; }
+        table { width:100%; border-collapse:collapse; font-size:0.85rem; }
+        th, td { padding:8px 10px; text-align:left; border-bottom:1px solid #e8eaed; }
+        th { background:#f8f9fa; font-weight:600; color:#5f6368; font-size:0.8rem; }
+        .total-row { background:#e8f0fe; font-weight:600; }
+        .btn { padding:6px 12px; border:none; border-radius:6px; cursor:pointer; font-size:0.8rem; margin:2px; }
+        .btn-success { background:#e6f4ea; color:#188038; }
+        .btn-danger { background:#fce8e6; color:#c5221f; }
+        .btn-warning { background:#fef3e8; color:#b06000; }
+        .btn-secondary { background:#f1f3f4; color:#3c4043; }
+        .control-card { border:1px solid #e8eaed; border-radius:8px; padding:12px; margin-bottom:8px; }
+        .control-card .meta { font-size:0.75rem; color:#5f6368; margin-bottom:6px; }
+        .control-card .comment { font-size:0.85rem; margin-bottom:8px; }
+        .control-card .actions { display:flex; gap:6px; flex-wrap:wrap; }
+        .comment-field { width:100%; padding:6px; border:1px solid #dadce0; border-radius:6px; font-size:0.8rem; margin-top:6px; display:none; }
+        .filters { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+        .filters select, .filters input { padding:6px 10px; border:1px solid #dadce0; border-radius:6px; font-size:0.85rem; }
+        .territory-block { margin-bottom:16px; }
+        .territory-name { font-weight:600; font-size:1rem; color:#1a73e8; margin-bottom:8px; }
+        .hidden { display:none; }
+        .show { display:table-row; }
+        .csv-links { margin-bottom:12px; }
+        .csv-links a { display:inline-block; padding:6px 12px; background:#e8f0fe; color:#1a73e8; border-radius:6px; text-decoration:none; font-size:0.8rem; margin-right:8px; }
+        .csv-links a:hover { background:#d2e3fc; }
+        .stat-badge { display:inline-block; padding:2px 8px; border-radius:12px; font-size:0.7rem; font-weight:500; margin-right:4px; }
+        .badge-contract { background:#e6f4ea; color:#188038; }
+        .badge-reject { background:#fce8e6; color:#c5221f; }
+        .badge-think { background:#fef3e8; color:#b06000; }
+        .badge-noanswer { background:#f3e8fd; color:#9334e6; }
     </style>
 </head>
 <body>
 <div class="container">
     <div class="nav">
-        <a href="dashboard.php" class="logo">🚀 SZB</a>
         <a href="dashboard.php">Дашборд</a>
-        <a href="team.php">Команда</a>
-        <a href="calls.php">📞 Я звоню</a>
-        <a href="rop_control.php" class="active">🛡️ Контроль</a>
-        <span class="user">👤 <?= htmlspecialchars($user_name) ?></span>
-        <a href="logout.php" class="logout">Выйти</a>
+        <a href="calls.php">Я звоню</a>
+        <a href="rop_control.php">Контроль</a>
+        <span style="margin-left:auto; font-size:0.85rem; color:#5f6368;"><?= htmlspecialchars($user_name) ?></span>
     </div>
 
-    <h2 style="margin-bottom:16px;">🛡️ Контроль качества звонков</h2>
-
-    <div class="card">
-        <form class="filters" method="GET">
-            <div>
-                <label>Период с</label>
-                <input type="date" name="date_from" value="<?= $filter_date_from ?>">
-            </div>
-            <div>
-                <label>по</label>
-                <input type="date" name="date_to" value="<?= $filter_date_to ?>">
-            </div>
-            <?php if ($is_head): ?>
-            <div>
-                <label>Статус</label>
-                <select name="status">
-                    <option value="" <?= $filter_status === '' ? 'selected' : '' ?>>Все</option>
-                    <option value="На проверке" <?= $filter_status === 'На проверке' ? 'selected' : '' ?>>На проверке</option>
-                    <option value="Подтверждено" <?= $filter_status === 'Подтверждено' ? 'selected' : '' ?>>Подтверждено</option>
-                    <option value="Отклонено" <?= $filter_status === 'Отклонено' ? 'selected' : '' ?>>Отклонено</option>
-                    <option value="Перепрозвон" <?= $filter_status === 'Перепрозвон' ? 'selected' : '' ?>>Перепрозвон</option>
-                </select>
-            </div>
+    <!-- Фильтры -->
+    <div class="panel">
+        <div class="filters">
+            <input type="month" value="<?= $filter_month ?>" onchange="location.search='?month='+this.value">
+            <input type="date" value="<?= $filter_date_from ?>" onchange="location.search='?date_from='+this.value+'&date_to='+document.querySelector('input[type=date]:nth-of-type(2)').value">
+            <input type="date" value="<?= $filter_date_to ?>">
+            <?php if ($is_head || $role === 'admin'): ?>
+            <select onchange="location.search='?status='+this.value">
+                <option value="На проверке" <?= $filter_status==='На проверке'?'selected':'' ?>>На проверке</option>
+                <option value="Подтверждено" <?= $filter_status==='Подтверждено'?'selected':'' ?>>Подтверждено</option>
+                <option value="Отклонено" <?= $filter_status==='Отклонено'?'selected':'' ?>>Отклонено</option>
+                <option value="Перепрозвон" <?= $filter_status==='Перепрозвон'?'selected':'' ?>>Перепрозвон</option>
+                <option value="Отказ подтверждён" <?= $filter_status==='Отказ подтверждён'?'selected':'' ?>>Отказ подтверждён</option>
+                <option value="Все" <?= $filter_status==='Все'?'selected':'' ?>>Все</option>
+            </select>
             <?php endif; ?>
-            <div>
-                <label>&nbsp;</label>
-                <button type="submit" class="btn-primary">🔍 Показать</button>
-            </div>
-            <div>
-                <label>&nbsp;</label>
-                <a href="?<?= http_build_query(array_merge($_GET, ['export' => 'csv'])) ?>" class="btn-outline">📥 Статистика CSV</a>
-            </div>
-            <div>
-                <label>&nbsp;</label>
-                <a href="?<?= http_build_query(array_merge($_GET, ['export' => 'csv_tasks'])) ?>" class="btn-outline">📋 Задачи CSV</a>
-            </div>
-        </form>
+        </div>
+
+        <?php if ($is_head || $role === 'admin'): ?>
+        <div class="csv-links">
+            <a href="?export_stats=1&date_from=<?= $filter_date_from ?>&date_to=<?= $filter_date_to ?>">Статистика CSV</a>
+            <a href="?export_tasks=1&status=<?= urlencode($filter_status) ?>">Задачи CSV</a>
+        </div>
+        <?php endif; ?>
     </div>
 
-    <?php if ($is_manager): ?>
-    <div class="stats-bar">
+    <!-- Статистика -->
+    <div class="panel">
+        <h3>Статистика</h3>
+
+        <?php if ($is_manager): ?>
+        <!-- Менеджер — только своя статистика -->
         <?php $s = $employees[0]['stats']; ?>
-        <div class="stat-card plan">
-            <div class="value"><?= $s['daily_plan'] ?></div>
-            <div class="label">📊 План/день</div>
-        </div>
-        <div class="stat-card done">
-            <div class="value"><?= $s['total_tasks'] ?></div>
-            <div class="label">📋 Задач</div>
-        </div>
-        <div class="stat-card done">
-            <div class="value"><?= $s['calls_done'] ?></div>
-            <div class="label">📞 Звонков</div>
-        </div>
-        <div class="stat-card control">
-            <div class="value"><?= $s['on_control'] ?></div>
-            <div class="label">🚨 На контроле</div>
-        </div>
-        <div class="stat-card pending">
-            <div class="value"><?= $s['confirmed'] ?></div>
-            <div class="label">✅ Подтверждено</div>
-        </div>
-    </div>
-    <?php endif; ?>
-
-    <?php if ($is_head): ?>
-    <!-- Статистика команды -->
-    <div class="card">
-        <h3>📊 Статистика команды</h3>
-        <table class="tb-table">
-            <thead>
-                <tr>
-                    <th>Сотрудник</th>
-                    <th>План/день</th>
-                    <th>Задач</th>
-                    <th>Звонков</th>
-                    <th>На контроле</th>
-                    <th>Подтверждено</th>
-                    <th>Отклонено</th>
-                    <th>Перепрозвон</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php 
-                $totals = ['daily_plan'=>0, 'total_tasks'=>0, 'calls_done'=>0, 'on_control'=>0, 'confirmed'=>0, 'rejected'=>0, 'recall'=>0];
-                foreach ($employees as $emp): 
-                    $s = $emp['stats'];
-                    $totals['daily_plan'] += $s['daily_plan'];
-                    $totals['total_tasks'] += $s['total_tasks'];
-                    $totals['calls_done'] += $s['calls_done'];
-                    $totals['on_control'] += $s['on_control'];
-                    $totals['confirmed'] += $s['confirmed'];
-                    $totals['rejected'] += $s['rejected'];
-                    $totals['recall'] += $s['recall'];
-                ?>
-                <tr>
-                    <td><strong><?= htmlspecialchars($emp['name']) ?></strong></td>
-                    <td><?= $s['daily_plan'] ?></td>
-                    <td><?= $s['total_tasks'] ?></td>
-                    <td><?= $s['calls_done'] ?></td>
-                    <td style="color:<?= $s['on_control'] > 0 ? '#dc3545' : '#28a745' ?>"><?= $s['on_control'] ?></td>
-                    <td style="color:#28a745;"><?= $s['confirmed'] ?></td>
-                    <td style="color:#dc3545;"><?= $s['rejected'] ?></td>
-                    <td style="color:#1a73e8;"><?= $s['recall'] ?></td>
-                </tr>
-                <?php endforeach; ?>
-                <tr class="total-row">
-                    <td>ИТОГО</td>
-                    <td><?= $totals['daily_plan'] ?></td>
-                    <td><?= $totals['total_tasks'] ?></td>
-                    <td><?= $totals['calls_done'] ?></td>
-                    <td><?= $totals['on_control'] ?></td>
-                    <td><?= $totals['confirmed'] ?></td>
-                    <td><?= $totals['rejected'] ?></td>
-                    <td><?= $totals['recall'] ?></td>
-                </tr>
-            </tbody>
+        <table>
+            <tr>
+                <th>План/день</th><th>Задачи</th><th>Звонки (отчёты)</th><th>Звонки (модуль)</th>
+                <th>Договоры</th><th>Отказы</th><th>Думает</th><th>Недозвоны</th><th>Подписания</th>
+                <th>На контроле</th><th>Подтверждено</th><th>Отклонено</th><th>Перепрозвон</th><th>Отказ подтверждён</th>
+            </tr>
+            <tr>
+                <td><?= $s['daily_plan'] ?></td>
+                <td><?= $s['total_tasks'] ?></td>
+                <td><?= $s['calls_done'] ?></td>
+                <td><?= $s['total_calls'] ?></td>
+                <td style="color:#188038"><?= $s['contracts'] ?></td>
+                <td style="color:#c5221f"><?= $s['rejects'] ?></td>
+                <td style="color:#b06000"><?= $s['thinks'] ?></td>
+                <td style="color:#9334e6"><?= $s['noanswers'] ?></td>
+                <td style="color:#188038"><?= $s['signed_count'] ?></td>
+                <td style="color:<?= $s['on_control']>0?'#c5221f':'#188038' ?>"><?= $s['on_control'] ?></td>
+                <td style="color:#188038"><?= $s['confirmed'] ?></td>
+                <td style="color:#c5221f"><?= $s['rejected'] ?></td>
+                <td style="color:#1a73e8"><?= $s['recall'] ?></td>
+                <td style="color:#c5221f"><?= $s['reject_confirmed'] ?></td>
+            </tr>
         </table>
+
+        <?php elseif ($is_head): ?>
+        <!-- Руководитель — таблица по команде -->
+        <table>
+            <tr>
+                <th>Сотрудник</th><th>План/день</th><th>Задачи</th><th>Звонки (отчёты)</th><th>Звонки (модуль)</th>
+                <th>Договоры</th><th>Отказы</th><th>Думает</th><th>Недозвоны</th><th>Подписания</th>
+                <th>На контроле</th><th>Подтверждено</th><th>Отклонено</th><th>Перепрозвон</th><th>Отказ подтверждён</th>
+            </tr>
+            <?php foreach ($employees as $emp): $s = $emp['stats']; ?>
+            <tr>
+                <td><?= htmlspecialchars($emp['name']) ?></td>
+                <td><?= $s['daily_plan'] ?></td>
+                <td><?= $s['total_tasks'] ?></td>
+                <td><?= $s['calls_done'] ?></td>
+                <td><?= $s['total_calls'] ?></td>
+                <td style="color:#188038"><?= $s['contracts'] ?></td>
+                <td style="color:#c5221f"><?= $s['rejects'] ?></td>
+                <td style="color:#b06000"><?= $s['thinks'] ?></td>
+                <td style="color:#9334e6"><?= $s['noanswers'] ?></td>
+                <td style="color:#188038"><?= $s['signed_count'] ?></td>
+                <td style="color:<?= $s['on_control']>0?'#c5221f':'#188038' ?>"><?= $s['on_control'] ?></td>
+                <td style="color:#188038"><?= $s['confirmed'] ?></td>
+                <td style="color:#c5221f"><?= $s['rejected'] ?></td>
+                <td style="color:#1a73e8"><?= $s['recall'] ?></td>
+                <td style="color:#c5221f"><?= $s['reject_confirmed'] ?></td>
+            </tr>
+            <?php endforeach; ?>
+            <?php if ($totals): ?>
+            <tr class="total-row">
+                <td>ИТОГО КОМАНДЫ</td>
+                <td><?= $totals['daily_plan'] ?></td>
+                <td><?= $totals['total_tasks'] ?></td>
+                <td><?= $totals['calls_done'] ?></td>
+                <td><?= $totals['total_calls'] ?></td>
+                <td><?= $totals['contracts'] ?></td>
+                <td><?= $totals['rejects'] ?></td>
+                <td><?= $totals['thinks'] ?></td>
+                <td><?= $totals['noanswers'] ?></td>
+                <td><?= $totals['signed_count'] ?></td>
+                <td><?= $totals['on_control'] ?></td>
+                <td><?= $totals['confirmed'] ?></td>
+                <td><?= $totals['rejected'] ?></td>
+                <td><?= $totals['recall'] ?></td>
+                <td><?= $totals['reject_confirmed'] ?></td>
+            </tr>
+            <?php endif; ?>
+        </table>
+        <?php endif; ?>
     </div>
 
-    <!-- БЛОК КОНТРОЛЯ ЗАДАЧ -->
-    <div class="card">
-        <h3>📋 Задачи на контроле (<?= count($control_tasks) ?>)</h3>
-        
-        <div class="stats-bar" style="margin-bottom:16px;">
-            <div class="stat-card pending">
-                <div class="value"><?= $status_counts['На проверке'] ?></div>
-                <div class="label">⏳ На проверке</div>
-            </div>
-            <div class="stat-card plan">
-                <div class="value"><?= $status_counts['Подтверждено'] ?></div>
-                <div class="label">✅ Подтверждено</div>
-            </div>
-            <div class="stat-card control">
-                <div class="value"><?= $status_counts['Отклонено'] ?></div>
-                <div class="label">❌ Отклонено</div>
-            </div>
-            <div class="stat-card done">
-                <div class="value"><?= $status_counts['Перепрозвон'] ?></div>
-                <div class="label">📞 Перепрозвон</div>
-            </div>
-        </div>
-
+    <?php if ($is_head || $role === 'admin'): ?>
+    <!-- Блок контроля задач -->
+    <div class="panel">
+        <h3>Задачи на контроле</h3>
         <?php if (empty($control_tasks)): ?>
-            <div class="empty-state">Нет задач на контроле за выбранный период</div>
+            <p style="color:#80868b; text-align:center; padding:20px;">Нет задач</p>
         <?php else: ?>
-            <?php foreach ($control_tasks as $t): ?>
-            <div class="task-item" id="task_<?= $t['control_id'] ?>">
-                <div class="task-header">
-                    <div>
-                        <strong>Задача <?= htmlspecialchars($t['task_id']) ?></strong>
-                        <span class="score-badge <?= $t['fraud_score'] >= 70 ? 'score-high' : ($t['fraud_score'] >= 40 ? 'score-mid' : 'score-low') ?>">
-                            <?= $t['fraud_score'] ?>/100
-                        </span>
-                        <span class="status-badge status-<?= $t['control_status'] === 'На проверке' ? 'pending' : ($t['control_status'] === 'Подтверждено' ? 'confirmed' : ($t['control_status'] === 'Отклонено' ? 'rejected' : 'recall')) ?>">
-                            <?= $t['control_status'] ?>
-                        </span>
-                    </div>
-                    <div class="task-meta">
-                        <span>👤 <?= htmlspecialchars($t['manager_name']) ?></span>
-                        <span>📍 <?= htmlspecialchars($t['territory_name']) ?></span>
-                        <span>📅 <?= date('d.m.Y H:i', strtotime($t['created_at'])) ?></span>
-                    </div>
+            <?php foreach ($control_tasks as $task): ?>
+            <div class="control-card">
+                <div class="meta">
+                    <strong>Задача:</strong> <?= htmlspecialchars(substr($task['task_id'], 0, 12)) ?>... |
+                    <strong>Менеджер:</strong> <?= htmlspecialchars($task['manager_name'] ?? '—') ?> |
+                    <strong>Территория:</strong> <?= htmlspecialchars($task['territory_name'] ?? '—') ?> |
+                    <strong>Фрод-скор:</strong> <span style="color:<?= $task['fraud_score']<40?'#c5221f':($task['fraud_score']<70?'#f9ab00':'#188038') ?>"><?= $task['fraud_score'] ?></span> |
+                    <strong>Статус:</strong> <?= $task['status'] ?>
+                    <?php if ($task['top_status'] && $task['top_status'] !== 'active'): ?>
+                        | <span class="stat-badge badge-<?= $task['top_status'] === 'signed' ? 'contract' : ($task['top_status'] === 'rejected_confirmed' ? 'reject' : 'think') ?>"><?= $task['top_status'] === 'signed' ? 'Договор' : ($task['top_status'] === 'rejected_confirmed' ? 'Отказ подтверждён' : $task['top_status']) ?></span>
+                    <?php endif; ?>
                 </div>
-                <div class="comment-preview">
-                    <strong>Комментарий менеджера:</strong><br>
-                    <?= nl2br(htmlspecialchars($t['comment_text'])) ?>
-                </div>
-                <?php if ($t['rop_comment']): ?>
-                <div class="comment-preview" style="background:#e8f5e9;">
-                    <strong>Комментарий РОПа:</strong> <?= htmlspecialchars($t['rop_comment']) ?>
-                    <span style="color:#888; font-size:0.75rem;">(<?= $t['rop_action'] ?> — <?= date('d.m.Y H:i', strtotime($t['checked_at'])) ?>)</span>
-                </div>
-                <?php endif; ?>
-                <?php if ($t['control_status'] === 'На проверке'): ?>
+                <div class="comment"><?= nl2br(htmlspecialchars($task['comment_text'])) ?></div>
                 <div class="actions">
-                    <button class="btn-confirm" onclick="ropAction(<?= $t['control_id'] ?>, 'confirm')">✅ Подтвердить</button>
-                    <button class="btn-reject" onclick="ropAction(<?= $t['control_id'] ?>, 'reject')">❌ Отклонить</button>
-                    <button class="btn-recall" onclick="ropAction(<?= $t['control_id'] ?>, 'recall')">📞 Перепрозвон</button>
+                    <?php if ($task['status'] === 'На проверке'): ?>
+                        <button class="btn btn-success" onclick="ropAction(<?= $task['id'] ?>, 'confirm')">Подтвердить</button>
+                        <button class="btn btn-danger" onclick="ropAction(<?= $task['id'] ?>, 'reject')">Отклонить</button>
+                        <button class="btn btn-warning" onclick="ropAction(<?= $task['id'] ?>, 'recall')">Перепрозвон</button>
+                        <?php if (strpos($task['comment_text'] ?? '', 'Отказ') !== false || $task['top_status'] === 'active'): ?>
+                            <button class="btn btn-danger" onclick="ropAction(<?= $task['id'] ?>, 'confirm_reject')" style="background:#c5221f; color:#fff;">Подтвердить отказ</button>
+                        <?php endif; ?>
+                    <?php endif; ?>
                 </div>
-                <textarea class="rop-comment hidden" id="comment_<?= $t['control_id'] ?>" placeholder="Комментарий обязателен при отклонении/перепрозвоне..."></textarea>
-                <?php endif; ?>
+                <textarea class="comment-field" id="comment_<?= $task['id'] ?>" placeholder="Комментарий РОПа..."></textarea>
             </div>
             <?php endforeach; ?>
         <?php endif; ?>
@@ -645,99 +534,74 @@ $territories = $stmt->fetchAll(PDO::FETCH_COLUMN);
     <?php endif; ?>
 
     <?php if ($is_terman): ?>
-    <?php foreach ($territories_data as $territory): ?>
-    <div class="card">
-        <div class="territory-title">
-            <span>🌍 <?= htmlspecialchars($territory['name']) ?></span>
-            <button class="toggle-btn" onclick="toggleHeads(<?= $territory['id'] ?>)">👥 Показать руководителей</button>
-        </div>
-
-        <div class="stats-bar" style="margin-bottom:16px;">
-            <div class="stat-card plan"><div class="value"><?= $territory['totals']['daily_plan'] ?></div><div class="label">План/день</div></div>
-            <div class="stat-card done"><div class="value"><?= $territory['totals']['total_tasks'] ?></div><div class="label">Задач</div></div>
-            <div class="stat-card done"><div class="value"><?= $territory['totals']['calls_done'] ?></div><div class="label">Звонков</div></div>
-            <div class="stat-card control"><div class="value"><?= $territory['totals']['on_control'] ?></div><div class="label">На контроле</div></div>
-            <div class="stat-card pending"><div class="value"><?= $territory['totals']['confirmed'] ?></div><div class="label">Подтверждено</div></div>
-            <div class="stat-card control"><div class="value"><?= $territory['totals']['rejected'] ?></div><div class="label">Отклонено</div></div>
-            <div class="stat-card pending"><div class="value"><?= $territory['totals']['recall'] ?></div><div class="label">Перепрозвон</div></div>
-        </div>
-
-        <table class="tb-table heads-table" id="heads_<?= $territory['id'] ?>">
-            <thead>
+    <!-- Иерархия территорий -->
+    <div class="panel">
+        <h3>Иерархия территорий</h3>
+        <?php foreach ($territories_data as $territory): ?>
+        <div class="territory-block">
+            <div class="territory-name"><?= htmlspecialchars($territory['name']) ?></div>
+            <button class="btn btn-secondary" onclick="toggleHeads(<?= $territory['id'] ?>)">Показать руководителей</button>
+            <table class="hidden" id="heads_<?= $territory['id'] ?>">
                 <tr>
-                    <th>Руководитель</th>
-                    <th>План/день</th>
-                    <th>Задач</th>
-                    <th>Звонков</th>
-                    <th>На контроле</th>
-                    <th>Подтверждено</th>
-                    <th>Отклонено</th>
-                    <th>Перепрозвон</th>
-                    <th></th>
+                    <th>Руководитель</th><th>План/день</th><th>Задачи</th><th>Звонки</th><th>Договоры</th><th>Отказы</th><th>Думает</th><th>Недозвоны</th><th>На контроле</th><th>Подтверждено</th><th>Отказ подтверждён</th>
                 </tr>
-            </thead>
-            <tbody>
                 <?php foreach ($territory['heads'] as $head): ?>
                 <tr>
-                    <td><strong><?= htmlspecialchars($head['name']) ?></strong></td>
-                    <td><?= $head['stats']['daily_plan'] ?></td>
-                    <td><?= $head['stats']['total_tasks'] + $head['team_totals']['total_tasks'] ?></td>
-                    <td><?= $head['stats']['calls_done'] + $head['team_totals']['calls_done'] ?></td>
-                    <td><?= $head['stats']['on_control'] + $head['team_totals']['on_control'] ?></td>
-                    <td><?= $head['stats']['confirmed'] + $head['team_totals']['confirmed'] ?></td>
-                    <td><?= $head['stats']['rejected'] + $head['team_totals']['rejected'] ?></td>
-                    <td><?= $head['stats']['recall'] + $head['team_totals']['recall'] ?></td>
-                    <td><button class="toggle-btn" onclick="toggleTeam(<?= $head['id'] ?>)">👥 Команда</button></td>
+                    <td><?= htmlspecialchars($head['name']) ?></td>
+                    <td><?= $head['team_totals']['daily_plan'] ?></td>
+                    <td><?= $head['team_totals']['total_tasks'] ?></td>
+                    <td><?= $head['team_totals']['calls_done'] ?></td>
+                    <td style="color:#188038"><?= $head['team_totals']['contracts'] ?></td>
+                    <td style="color:#c5221f"><?= $head['team_totals']['rejects'] ?></td>
+                    <td style="color:#b06000"><?= $head['team_totals']['thinks'] ?></td>
+                    <td style="color:#9334e6"><?= $head['team_totals']['noanswers'] ?></td>
+                    <td style="color:<?= $head['team_totals']['on_control']>0?'#c5221f':'#188038' ?>"><?= $head['team_totals']['on_control'] ?></td>
+                    <td style="color:#188038"><?= $head['team_totals']['confirmed'] ?></td>
+                    <td style="color:#c5221f"><?= $head['team_totals']['reject_confirmed'] ?></td>
                 </tr>
                 <tr>
-                    <td colspan="9" style="padding:0;">
-                        <table class="tb-table team-table" id="team_<?= $head['id'] ?>">
-                            <thead>
-                                <tr>
-                                    <th>Сотрудник</th>
-                                    <th>План/день</th>
-                                    <th>Задач</th>
-                                    <th>Звонков</th>
-                                    <th>На контроле</th>
-                                    <th>Подтверждено</th>
-                                    <th>Отклонено</th>
-                                    <th>Перепрозвон</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach ($head['team'] as $emp): 
-                                    $s = $emp['stats'];
-                                ?>
-                                <tr>
-                                    <td><?= htmlspecialchars($emp['name']) ?></td>
-                                    <td><?= $s['daily_plan'] ?></td>
-                                    <td><?= $s['total_tasks'] ?></td>
-                                    <td><?= $s['calls_done'] ?></td>
-                                    <td style="color:<?= $s['on_control'] > 0 ? '#dc3545' : '#28a745' ?>"><?= $s['on_control'] ?></td>
-                                    <td style="color:#28a745;"><?= $s['confirmed'] ?></td>
-                                    <td style="color:#dc3545;"><?= $s['rejected'] ?></td>
-                                    <td style="color:#1a73e8;"><?= $s['recall'] ?></td>
-                                </tr>
-                                <?php endforeach; ?>
-                                <tr class="total-row">
-                                    <td>ИТОГО КОМАНДЫ</td>
-                                    <td><?= $head['team_totals']['daily_plan'] ?></td>
-                                    <td><?= $head['team_totals']['total_tasks'] ?></td>
-                                    <td><?= $head['team_totals']['calls_done'] ?></td>
-                                    <td><?= $head['team_totals']['on_control'] ?></td>
-                                    <td><?= $head['team_totals']['confirmed'] ?></td>
-                                    <td><?= $head['team_totals']['rejected'] ?></td>
-                                    <td><?= $head['team_totals']['recall'] ?></td>
-                                </tr>
-                            </tbody>
+                    <td colspan="11" style="padding:0;">
+                        <button class="btn btn-secondary" onclick="toggleTeam(<?= $head['id'] ?>)" style="margin:8px;">Команда</button>
+                        <table class="hidden" id="team_<?= $head['id'] ?>" style="margin:8px; width:calc(100% - 16px);">
+                            <tr>
+                                <th>Сотрудник</th><th>План/день</th><th>Задачи</th><th>Звонки</th><th>Договоры</th><th>Отказы</th><th>Думает</th><th>Недозвоны</th><th>На контроле</th><th>Подтверждено</th><th>Отказ подтверждён</th>
+                            </tr>
+                            <?php foreach ($head['team'] as $emp): $s = $emp['stats']; ?>
+                            <tr>
+                                <td><?= htmlspecialchars($emp['name']) ?></td>
+                                <td><?= $s['daily_plan'] ?></td>
+                                <td><?= $s['total_tasks'] ?></td>
+                                <td><?= $s['calls_done'] ?></td>
+                                <td style="color:#188038"><?= $s['contracts'] ?></td>
+                                <td style="color:#c5221f"><?= $s['rejects'] ?></td>
+                                <td style="color:#b06000"><?= $s['thinks'] ?></td>
+                                <td style="color:#9334e6"><?= $s['noanswers'] ?></td>
+                                <td style="color:<?= $s['on_control']>0?'#c5221f':'#188038' ?>"><?= $s['on_control'] ?></td>
+                                <td style="color:#188038"><?= $s['confirmed'] ?></td>
+                                <td style="color:#c5221f"><?= $s['reject_confirmed'] ?></td>
+                            </tr>
+                            <?php endforeach; ?>
+                            <tr class="total-row">
+                                <td>ИТОГО КОМАНДЫ</td>
+                                <td><?= $head['team_totals']['daily_plan'] ?></td>
+                                <td><?= $head['team_totals']['total_tasks'] ?></td>
+                                <td><?= $head['team_totals']['calls_done'] ?></td>
+                                <td><?= $head['team_totals']['contracts'] ?></td>
+                                <td><?= $head['team_totals']['rejects'] ?></td>
+                                <td><?= $head['team_totals']['thinks'] ?></td>
+                                <td><?= $head['team_totals']['noanswers'] ?></td>
+                                <td><?= $head['team_totals']['on_control'] ?></td>
+                                <td><?= $head['team_totals']['confirmed'] ?></td>
+                                <td><?= $head['team_totals']['reject_confirmed'] ?></td>
+                            </tr>
                         </table>
                     </td>
                 </tr>
                 <?php endforeach; ?>
-            </tbody>
-        </table>
+            </table>
+        </div>
+        <?php endforeach; ?>
     </div>
-    <?php endforeach; ?>
     <?php endif; ?>
 </div>
 
@@ -747,10 +611,10 @@ function toggleTeam(headId) {
     const btn = event.target;
     if (table.classList.contains('show')) {
         table.classList.remove('show');
-        btn.textContent = '👥 Команда';
+        btn.textContent = 'Команда';
     } else {
         table.classList.add('show');
-        btn.textContent = '👥 Скрыть';
+        btn.textContent = 'Скрыть';
     }
 }
 function toggleHeads(territoryId) {
@@ -758,30 +622,27 @@ function toggleHeads(territoryId) {
     const btn = event.target;
     if (table.classList.contains('show')) {
         table.classList.remove('show');
-        btn.textContent = '👥 Показать руководителей';
+        btn.textContent = 'Показать руководителей';
     } else {
         table.classList.add('show');
-        btn.textContent = '👥 Скрыть руководителей';
+        btn.textContent = 'Скрыть руководителей';
     }
 }
 
 // --- Блок контроля: действия РОПа ---
 function ropAction(controlId, action) {
     const commentField = document.getElementById('comment_' + controlId);
-    
+
     if (action === 'confirm') {
         sendRopAction(controlId, action, '');
     } else {
-        // Отклонить или Перепрозвон — нужен комментарий
         if (commentField.classList.contains('hidden')) {
-            // Первый клик — показываем поле комментария
             commentField.classList.remove('hidden');
             commentField.focus();
         } else {
-            // Второй клик — отправляем
             const comment = commentField.value.trim();
             if (!comment) {
-                alert('Комментарий обязателен при отклонении или перепрозвоне!');
+                alert('Комментарий обязателен!');
                 return;
             }
             sendRopAction(controlId, action, comment);
@@ -791,11 +652,11 @@ function ropAction(controlId, action) {
 
 function sendRopAction(controlId, action, comment) {
     if (!confirm('Подтвердить действие?')) return;
-    
+
     fetch('api_rop_action.php', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ control_id: controlId, action: action, comment: comment })
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({control_id: controlId, action: action, comment: comment})
     })
     .then(r => r.json())
     .then(data => {

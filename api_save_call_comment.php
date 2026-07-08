@@ -24,10 +24,29 @@ $next_step = trim($input['next_step'] ?? '');
 $decision_maker = trim($input['decision_maker'] ?? '');
 $free_comment = trim($input['free_comment'] ?? '');
 
-if (!$task_id || !$comment_text) {
+if (!$task_id) {
+    echo json_encode(['error' => 'Нет task_id']);
+    exit;
+}
+
+// ========== ОСОБЫЕ СТАТУСЫ: не требуют комментария ==========
+$no_comment_required = ['noanswer', 'contract'];
+$is_no_comment = in_array($status, $no_comment_required);
+
+if (!$is_no_comment && !$comment_text) {
     echo json_encode(['error' => 'Нет данных']);
     exit;
 }
+
+// Для "Недозвона" — минимальный комментарий автоматически
+if ($status === 'noanswer' && !$comment_text) {
+    $comment_text = 'Недозвон';
+}
+
+// ========== ПОДСЧЁТ ЗВОНКОВ ПО ЗАДАЧЕ ==========
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM call_comments WHERE task_id = ?");
+$stmt->execute([$task_id]);
+$call_count = (int)$stmt->fetchColumn() + 1; // +1 текущий
 
 // ========== ФРОД-СКОР (0-100) ==========
 $fraud_score = 0;
@@ -91,16 +110,54 @@ foreach ($suspicious as $s) {
 }
 if ($susp_count >= 3) $fraud_score -= 15;
 
+// ========== ОСОБЫЕ ПРАВИЛА ДЛЯ НОВЫХ СТАТУСОВ ==========
+
+// "Недозвон" — минимальный фрод-скор (10-30), не идёт на контроль
+if ($status === 'noanswer') {
+    $fraud_score = max(10, min(30, $fraud_score));
+}
+
+// "Договор заключён" — максимальный фрод-скор (80-100), не идёт на контроль
+if ($status === 'contract') {
+    $fraud_score = max(80, min(100, $fraud_score));
+}
+
+// "Отказ" — средний фрод-скор, идёт на контроль РОПа
+if ($status === 'reject') {
+    $fraud_score = max(20, min(60, $fraud_score));
+}
+
 // Ограничиваем 0-100
 $fraud_score = max(0, min(100, round($fraud_score)));
 
 // ========== РЕШЕНИЕ О РОП-КОНТРОЛЕ ==========
-$rop_control = ($fraud_score < 60);
-$new_status = $rop_control ? 'На контроле РОП' : 'Подтверждена';
+// На контроль: скор < 60 ИЛИ статус "Отказ"
+$rop_control = ($fraud_score < 60 || $status === 'reject');
+
+// ========== ОПРЕДЕЛЕНИЕ СТАТУСОВ ЗАДАЧИ ==========
+$new_status = 'Назначена';
+$top_status = 'active';
+
+if ($status === 'contract') {
+    $new_status = 'Договор заключён';
+    $top_status = 'signed';
+} elseif ($status === 'reject') {
+    $new_status = 'На контроле РОП';
+    $top_status = 'active'; // Пока на контроле
+} elseif ($status === 'noanswer') {
+    $new_status = 'Назначена'; // Остаётся в пуле
+    $top_status = 'active';
+} elseif ($rop_control) {
+    $new_status = 'На контроле РОП';
+    $top_status = 'active';
+} else {
+    $new_status = 'Подтверждена';
+    $top_status = 'active';
+}
 
 // ========== РАСЧЁТ ГОТОВНОСТИ СДЕЛКИ ==========
 $readiness = 0;
-if ($status === 'signed') $readiness = 100;
+if ($status === 'contract') $readiness = 100;
 elseif ($status === 'reject') $readiness = 0;
 else {
     $keywords = [
@@ -122,27 +179,36 @@ try {
     // Сохраняем комментарий
     $stmt = $pdo->prepare("
         INSERT INTO call_comments 
-        (task_id, user_id, comment_text, call_result, next_call_date, deal_readiness, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+        (task_id, user_id, comment_text, call_result, next_call_date, deal_readiness, created_at, call_count)
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
     ");
-    $stmt->execute([$task_id, $user_id, $comment_text, $status, $next_call_date, $readiness]);
+    $stmt->execute([$task_id, $user_id, $comment_text, $status, $next_call_date, $readiness, $call_count]);
 
-    // Обновляем статус задачи
+    // Обновляем статус задачи и счётчики
+    // first_status_at — только если ещё не установлен и статус не 'Назначена'
     $stmt = $pdo->prepare("
         UPDATE epk_tasks 
-        SET status = ?, next_call_date = ?, updated_at = datetime('now')
+        SET status = ?, 
+            next_call_date = ?, 
+            updated_at = datetime('now'),
+            call_count = call_count + 1,
+            top_status = CASE WHEN top_status = 'active' THEN ? ELSE top_status END,
+            first_status_at = CASE 
+                WHEN first_status_at IS NULL AND ? != 'Назначена' THEN datetime('now') 
+                ELSE first_status_at 
+            END
         WHERE task_id = ?
     ");
-    $stmt->execute([$new_status, $next_call_date, $task_id]);
+    $stmt->execute([$new_status, $next_call_date, $top_status, $new_status, $task_id]);
 
     // Если РОП-контроль — добавляем в таблицу контроля
     if ($rop_control) {
         $stmt = $pdo->prepare("
             INSERT INTO rop_control_queue 
-            (task_id, user_id, tabel, fraud_score, comment_text, status, created_at)
-            VALUES (?, ?, ?, ?, ?, 'На проверке', datetime('now'))
+            (task_id, user_id, tabel, fraud_score, comment_text, status, top_status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'На проверке', ?, datetime('now'))
         ");
-        $stmt->execute([$task_id, $user_id, $tabel, $fraud_score, $comment_text]);
+        $stmt->execute([$task_id, $user_id, $tabel, $fraud_score, $comment_text, $top_status]);
     }
 
     $pdo->commit();
@@ -152,7 +218,10 @@ try {
         'fraud_score' => $fraud_score,
         'rop_control' => $rop_control,
         'readiness' => $readiness,
-        'next_call_date' => $next_call_date
+        'next_call_date' => $next_call_date,
+        'call_count' => $call_count,
+        'new_status' => $new_status,
+        'top_status' => $top_status
     ]);
 
 } catch (Exception $e) {

@@ -17,44 +17,53 @@ if ($mode === 'generate_plan') {
     $history = $input['history'] ?? [];
 
     // Формируем микроплан на основе истории
-    $plan = "<strong>🎯 Микроплан звонка</strong><br>";
+    $plan = "<strong>Микроплан звонка</strong><br>";
     $plan .= "<ul>";
 
     if (empty($history)) {
         // Первый звонок
-        $plan .= "<li>📞 <strong>Первый контакт</strong> — представьтесь, уточните потребность</li>";
-        $plan .= "<li>💰 Расскажите про $product: комиссия от 1,2%, СБП 0%</li>";
-        $plan .= "<li>❓ Выявите возражения: цена, конкуренты, не нужен сейчас</li>";
-        $plan .= "<li>📅 Назначьте следующий контакт или договоритесь о встрече</li>";
+        $plan .= "<li><strong>Первый контакт</strong> — представьтесь, уточните потребность</li>";
+        $plan .= "<li>Расскажите про $product: комиссия от 1,2%, СБП 0%</li>";
+        $plan .= "<li>Выявите возражения: цена, конкуренты, не нужен сейчас</li>";
+        $plan .= "<li>Назначьте следующий контакт или договоритесь о встрече</li>";
     } else {
         // Повторный звонок — анализируем историю
         $last = $history[0] ?? null;
         $last_text = $last['comment_text'] ?? '';
         $last_status = $last['call_result'] ?? '';
 
-        $plan .= "<li>📞 <strong>Повторный контакт</strong> — напомните о предыдущем разговоре</li>";
+        $plan .= "<li><strong>Повторный контакт</strong> — напомните о предыдущем разговоре</li>";
 
+        if ($last_status === 'noanswer') {
+            $plan .= "<li>Клиент не ответил — попробуйте другое время, уточните контакты</li>";
+        }
+        if ($last_status === 'reject') {
+            $plan .= "<li>Был отказ — уточните причину, предложите альтернативу</li>";
+        }
+        if ($last_status === 'contract') {
+            $plan .= "<li><strong>Поздравляем! Договор заключён.</strong> Зафиксируйте детали.</li>";
+        }
         if (stripos($last_text, 'думает') !== false || $last_status === 'think') {
-            $plan .= "<li>⏰ Клиент думал — уточните решение, предложите помощь</li>";
+            $plan .= "<li>Клиент думал — уточните решение, предложите помощь</li>";
         }
         if (stripos($last_text, 'кп') !== false || stripos($last_text, 'коммерческое') !== false) {
-            $plan .= "<li>📄 Уточните, получил ли клиент КП, есть ли вопросы</li>";
+            $plan .= "<li>Уточните, получил ли клиент КП, есть ли вопросы</li>";
         }
         if (stripos($last_text, 'встреча') !== false || stripos($last_text, 'демо') !== false) {
-            $plan .= "<li>🤝 Подтвердите встречу, уточните время и место</li>";
+            $plan .= "<li>Подтвердите встречу, уточните время и место</li>";
         }
         if (stripos($last_text, 'дорого') !== false || stripos($last_text, 'цена') !== false) {
-            $plan .= "<li>💰 Обсудите тарифы, покажите калькулятор выгоды</li>";
+            $plan .= "<li>Обсудите тарифы, покажите калькулятор выгоды</li>";
         }
         if (stripos($last_text, 'конкурент') !== false || stripos($last_text, 'тинькофф') !== false || stripos($last_text, 'альфа') !== false) {
-            $plan .= "<li>🏦 Отработайте конкурентов: СБП бесплатно, поддержка 24/7</li>";
+            $plan .= "<li>Отработайте конкурентов: СБП бесплатно, поддержка 24/7</li>";
         }
 
-        $plan .= "<li>📅 Зафиксируйте договорённости, назначьте следующий шаг</li>";
+        $plan .= "<li>Зафиксируйте договорённости, назначьте следующий шаг</li>";
     }
 
     $plan .= "</ul>";
-    $plan .= "<div style='margin-top:8px; font-size:0.8rem; color:#666;'>💡 Совет: запишите разговор, если есть возможность</div>";
+    $plan .= "<div style='margin-top:8px; font-size:0.8rem; color:#666;'>Совет: запишите разговор, если есть возможность</div>";
 
     echo json_encode(['response' => $plan]);
     exit;
@@ -68,19 +77,33 @@ if ($mode === 'analyze_call') {
     $analysis = [];
     $lower = mb_strtolower($text);
 
+    // Особые статусы — упрощённый анализ
+    if ($status === 'noanswer') {
+        echo json_encode(['response' => 'Недозвон зафиксирован. Попробуйте позже.']);
+        exit;
+    }
+    if ($status === 'contract') {
+        echo json_encode(['response' => 'Отлично! Договор заключён. Зафиксируйте детали сделки.']);
+        exit;
+    }
+    if ($status === 'reject') {
+        echo json_encode(['response' => 'Отказ зафиксирован. Укажите причину — это поможет аналитике.']);
+        exit;
+    }
+
     // Проверяем наличие ключевых элементов
     $has_problem = stripos($lower, 'проблема') !== false || stripos($lower, 'беспокоит') !== false;
     $has_objection = stripos($lower, 'возражение') !== false || stripos($lower, 'дорого') !== false;
     $has_next_step = stripos($lower, 'договорились') !== false || stripos($lower, 'перезвон') !== false;
     $has_decision = stripos($lower, 'реш') !== false || stripos($lower, 'директор') !== false;
 
-    if (!$has_problem) $analysis[] = "❌ Не указана проблема клиента";
-    if (!$has_objection) $analysis[] = "⚠️ Не зафиксированы возражения";
-    if (!$has_next_step) $analysis[] = "⚠️ Нет чётких договорённостей";
-    if (!$has_decision) $analysis[] = "⚠️ Не указано, кто принимает решение";
+    if (!$has_problem) $analysis[] = "Не указана проблема клиента";
+    if (!$has_objection) $analysis[] = "Не зафиксированы возражения";
+    if (!$has_next_step) $analysis[] = "Нет чётких договорённостей";
+    if (!$has_decision) $analysis[] = "Не указано, кто принимает решение";
 
     if (empty($analysis)) {
-        $analysis[] = "✅ Хороший комментарий! Все ключевые элементы на месте.";
+        $analysis[] = "Хороший комментарий! Все ключевые элементы на месте.";
     }
 
     echo json_encode(['response' => implode("<br>", $analysis)]);
@@ -90,7 +113,7 @@ if ($mode === 'analyze_call') {
 // Режим analyze_answers — анализ ответов на вопросы ИИ
 if ($mode === 'analyze_answers') {
     $answers = $input['answers'] ?? [];
-    echo json_encode(['response' => '✅ Ответы получены. Продолжайте работу с клиентом.']);
+    echo json_encode(['response' => 'Ответы получены. Продолжайте работу с клиентом.']);
     exit;
 }
 

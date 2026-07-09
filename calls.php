@@ -395,9 +395,7 @@ function assembleFullText() {
 
     // Добавляем историю, если есть
     if (commentHistory && commentHistory.length > 0) {
-        fullText += '
-
---- История звонков ---';
+        fullText += '\n\n--- История звонков ---';
         commentHistory.forEach((h) => {
             const statusMap = {
                 think: 'Думает', signed: 'Подписан', reject: 'Отказ',
@@ -405,10 +403,7 @@ function assembleFullText() {
                 noanswer: 'Недозвон', contract: 'Договор'
             };
             const statusText = statusMap[h.call_result] || h.call_result;
-            fullText += '
-
-[' + h.created_at + '] ' + statusText + ':
-' + (h.comment_text || '(без комментария)');
+            fullText += '\n\n[' + h.created_at + '] ' + statusText + ':\n' + (h.comment_text || '(без комментария)');
         });
     }
 

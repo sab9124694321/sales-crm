@@ -1,4 +1,4 @@
-# Архитектура SZB CRM
+# Архитектура SZB CRM v2.1
 
 ## Стек
 - PHP 7.4+
@@ -10,7 +10,7 @@
 ## Структура файлов
 - Ядро: config.php, db.php, login.php
 - Дашборды: dashboard.php, team.php, ubr_dashboard.php, mmb_dashboard.php, mmb_head_dashboard.php, ai_dashboard.php, hunter_dashboard.php
-- Модуль "Я звоню": calls.php, api_call_coach.php, api_save_call_comment.php, api_call_history.php, api_add_tasks.php, api_clear_tasks.php, api_upload_tasks.php, api_rop_action.php, rop_control.php, call_schema.sql
+- Модуль "Я звоню" v2.1: calls.php, api_call_coach.php, api_save_call_comment.php, api_call_history.php, api_add_tasks.php, api_clear_tasks.php, api_upload_tasks.php, api_rop_action.php, rop_control.php, call_schema.sql
 - AI-модули: ai.php, ai_dashboard.php, ai_classify.php, api_ai_ask.php, api_ai_analytics.php, generate_ai_advices.php, api_meeting_summary.php
 - Охотники: hunter_*.php
 - API: api_*.php, ocr_*.php
@@ -24,17 +24,30 @@
 - leads — лиды
 - hunters — охотники
 - tickets — тикеты поддержки
-- epk_tasks — задачи из Ритм (новое!)
-- call_comments — комментарии к звонкам + фрод-скор (новое!)
-- rop_control_queue — очередь на контроль РОПа (новое!)
-- manager_call_stats — статистика менеджеров (новое!)
+- epk_tasks — задачи из Ритм (v2.1: +call_count, first_status_at, top_status)
+- call_comments — комментарии к звонкам + фрод-скор (v2.1: +call_count)
+- rop_control_queue — очередь на контроль РОПа (v2.1: +top_status)
+- manager_call_stats — статистика менеджеров
 - ai_advice_cache / ai_book_cache — кэш AI
+
+## Статусы задач (v2.1)
+- Назначена — в пуле
+- Подтверждена — прошла контроль
+- На контроле РОП — на проверке
+- Договор заключён — финальный (v2.1)
+- Отказ подтверждён — финальный (v2.1)
+
+## Верхнеуровневые статусы (top_status)
+- active — активная
+- signed — договор/подписание
+- rejected_confirmed — отказ подтверждён
+- think — думает
 
 ## Интеграции
 - GigaChat (Сбер) — AI, OCR
 - Ритм (бывш. Тортуга) — задачи для звонков
-- Макс — корп. мессенджер (тестовое сообщение ушло)
-- PHPMailer — почта (есть проблемы на iPad)
+- Макс — корп. мессенджер
+- PHPMailer — почта
 
 ## Иерархия ролей
 ```

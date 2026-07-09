@@ -194,7 +194,7 @@ $competitive = [
                 ?>
                 <div class="task-item" data-task="<?= htmlspecialchars($tid) ?>" onclick="selectTask('<?= htmlspecialchars($tid) ?>')">
                     <div style="display:flex;align-items:center;flex-wrap:wrap;">
-                        <span class="task-num"><?= htmlspecialchars(substr($tid, 0, 8)) ?>...</span>
+                        <span class="task-num">...<?= htmlspecialchars(substr($tid, -8)) ?></span>
                         <span class="status-badge <?= $status_class ?>"><?= $status_text ?></span>
                         <?php if ($calls > 0): ?><span class="task-calls">(<?= $calls ?> зв.)</span><?php endif; ?>
                         <?php if ($think_time_str): ?><span class="task-think-time"><?= $think_time_str ?></span><?php endif; ?>
@@ -212,6 +212,11 @@ $competitive = [
         <!-- Правая колонка: форма -->
         <div class="panel" id="formPanel">
             <h3 id="formTitle">Выберите задачу</h3>
+            <div id="ritmLink" style="display:none; margin-bottom:12px;">
+                <a href="#" target="_blank" style="color:#1a73e8; font-size:0.85rem; text-decoration:none;">
+                    🔗 Открыть в Ритм
+                </a>
+            </div>
             <div id="formContent" style="display:none;">
 
                 <div class="form-section">
@@ -304,6 +309,12 @@ function selectTask(taskId) {
     document.getElementById('formTitle').textContent = 'Задача: ' + taskId.substring(0, 12) + '...';
     document.getElementById('formContent').style.display = 'block';
 
+    // Обновляем ссылку на Ритм
+    const ritmLink = document.getElementById('ritmLink');
+    const ritmUrl = 'https://new-tortuga.sigma.sbrf.ru/tort/tasks/sales/' + taskId;
+    ritmLink.querySelector('a').href = ritmUrl;
+    ritmLink.style.display = 'block';
+
     // Сброс формы
     document.getElementById('callStatus').value = 'think';
     document.getElementById('painPoint').value = '';
@@ -375,13 +386,42 @@ function updateAssembledComment() {
     }
 }
 
+// ========== СОБРАТЬ ПОЛНЫЙ ТЕКСТ (текущий + история) ==========
+function assembleFullText() {
+    const comment = assembleComment();
+    if (!comment.trim()) return '';
+
+    let fullText = comment;
+
+    // Добавляем историю, если есть
+    if (commentHistory && commentHistory.length > 0) {
+        fullText += '
+
+--- История звонков ---';
+        commentHistory.forEach((h) => {
+            const statusMap = {
+                think: 'Думает', signed: 'Подписан', reject: 'Отказ',
+                nocontact: 'Нет контакта', recall: 'Перезвон',
+                noanswer: 'Недозвон', contract: 'Договор'
+            };
+            const statusText = statusMap[h.call_result] || h.call_result;
+            fullText += '
+
+[' + h.created_at + '] ' + statusText + ':
+' + (h.comment_text || '(без комментария)');
+        });
+    }
+
+    return fullText;
+}
+
 // ========== КОПИРОВАТЬ КОММЕНТАРИЙ ==========
 function copyComment() {
-    const comment = assembleComment();
-    if (!comment.trim()) { showToast('Заполните форму'); return; }
+    const fullText = assembleFullText();
+    if (!fullText) { showToast('Заполните форму'); return; }
 
-    navigator.clipboard.writeText(comment).then(() => {
-        showToast('Скопировано в буфер');
+    navigator.clipboard.writeText(fullText).then(() => {
+        showToast('Скопировано в буфер (с историей)');
     });
 }
 
@@ -416,10 +456,15 @@ function saveCall() {
     .then(r => r.json())
     .then(d => {
         if (d.success) {
-            // Копируем в буфер
-            navigator.clipboard.writeText(comment).then(() => {
-                showToast('Сохранено и скопировано. Фрод-скор: ' + d.fraud_score);
-            });
+            // Копируем в буфер (текущий + история)
+            const fullText = assembleFullText();
+            if (fullText) {
+                navigator.clipboard.writeText(fullText).then(() => {
+                    showToast('Сохранено и скопировано. Фрод-скор: ' + d.fraud_score);
+                });
+            } else {
+                showToast('Сохранено. Фрод-скор: ' + d.fraud_score);
+            }
 
             // Обновляем список задач без перезагрузки
             updateTaskInList(currentTask, d.new_status, d.call_count);
@@ -532,11 +577,11 @@ function loadHistory(taskId) {
 
 // ========== КОПИРОВАТЬ И ПЕРЕЙТИ ==========
 function copyAndGo() {
-    const comment = assembleComment();
-    if (!comment.trim()) { showToast('Заполните форму'); return; }
+    const fullText = assembleFullText();
+    if (!fullText) { showToast('Заполните форму'); return; }
 
-    navigator.clipboard.writeText(comment).then(() => {
-        showToast('Скопировано');
+    navigator.clipboard.writeText(fullText).then(() => {
+        showToast('Скопировано (с историей)');
         setTimeout(() => window.open('https://new-tortuga.sigma.sbrf.ru/tort/tasks/sales/' + currentTask, '_blank'), 500);
     });
 }

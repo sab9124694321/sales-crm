@@ -363,7 +363,7 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin')) {
         .control-card .meta { font-size:0.75rem; color:#5f6368; margin-bottom:6px; }
         .control-card .comment { font-size:0.85rem; margin-bottom:8px; }
         .control-card .actions { display:flex; gap:6px; flex-wrap:wrap; }
-        .comment-field { width:100%; padding:6px; border:1px solid #dadce0; border-radius:6px; font-size:0.8rem; margin-top:6px; display:none; }
+        .comment-field { width:100%; padding:6px; border:1px solid #dadce0; border-radius:6px; font-size:0.8rem; margin-top:6px; }
         .filters { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
         .filters select, .filters input { padding:6px 10px; border:1px solid #dadce0; border-radius:6px; font-size:0.85rem; }
         .territory-block { margin-bottom:16px; }
@@ -506,7 +506,8 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin')) {
             <?php foreach ($control_tasks as $task): ?>
             <div class="control-card">
                 <div class="meta">
-                    <strong>Задача:</strong> <?= htmlspecialchars(substr($task['task_id'], 0, 12)) ?>... |
+                    <strong>Задача:</strong> ...<?= htmlspecialchars(substr($task['task_id'], -8)) ?> |
+                    <a href="https://new-tortuga.sigma.sbrf.ru/tort/tasks/sales/<?= htmlspecialchars($task['task_id']) ?>" target="_blank" style="color:#1a73e8; text-decoration:none; font-size:0.8rem;">🔗 Открыть в Ритм</a> |
                     <strong>Менеджер:</strong> <?= htmlspecialchars($task['manager_name'] ?? '—') ?> |
                     <strong>Территория:</strong> <?= htmlspecialchars($task['territory_name'] ?? '—') ?> |
                     <strong>Фрод-скор:</strong> <span style="color:<?= $task['fraud_score']<40?'#c5221f':($task['fraud_score']<70?'#f9ab00':'#188038') ?>"><?= $task['fraud_score'] ?></span> |
@@ -634,19 +635,17 @@ function ropAction(controlId, action) {
     const commentField = document.getElementById('comment_' + controlId);
 
     if (action === 'confirm') {
-        sendRopAction(controlId, action, '');
+        // Подтвердить — комментарий не обязателен
+        sendRopAction(controlId, action, commentField.value.trim());
     } else {
-        if (commentField.classList.contains('hidden')) {
-            commentField.classList.remove('hidden');
+        // Отклонить, Перепрозвон, Подтвердить отказ — комментарий обязателен
+        const comment = commentField.value.trim();
+        if (!comment) {
+            alert('Комментарий обязателен!');
             commentField.focus();
-        } else {
-            const comment = commentField.value.trim();
-            if (!comment) {
-                alert('Комментарий обязателен!');
-                return;
-            }
-            sendRopAction(controlId, action, comment);
+            return;
         }
+        sendRopAction(controlId, action, comment);
     }
 }
 

@@ -1,56 +1,172 @@
 <?php
 session_start();
-header('Content-Type: application/json');
+header('Content-Type: application/json; charset=utf-8');
 require_once 'db.php';
 
-if (!isset($_SESSION['user_id'])) {
+// Проверка авторизации
+if (empty($_SESSION['user_id'])) {
     echo json_encode(['error' => 'Не авторизован']);
     exit;
 }
 
-$user_id = $_SESSION['user_id'];
-$tabel = $_SESSION['tabel'] ?? null;
+$userId = $_SESSION['user_id'];
+
+// Получаем данные из POST
 $input = json_decode(file_get_contents('php://input'), true);
-
-$task_id = trim($input['task_id'] ?? '');
-$comment_text = trim($input['comment_text'] ?? '');
-$product = trim($input['product'] ?? '');
-$status = trim($input['status'] ?? 'think');
-$next_call_date = trim($input['next_call_date'] ?? '');
-$pain_point = trim($input['pain_point'] ?? '');
-$objection = trim($input['objection'] ?? '');
-$objection_text = trim($input['objection_text'] ?? '');
-$next_step = trim($input['next_step'] ?? '');
-$decision_maker = trim($input['decision_maker'] ?? '');
-$free_comment = trim($input['free_comment'] ?? '');
-
-if (!$task_id) {
-    echo json_encode(['error' => 'Нет task_id']);
+if (!$input) {
+    echo json_encode(['error' => 'Нет данных']);
     exit;
 }
 
-// ========== ПРОВЕРКА ЧЕРЕЗ GIGACHAT AI ==========
-require_once 'config.php';
+$taskId     = $input['task_id']     ?? '';
+$callResult = $input['call_result'] ?? '';
+$painPoint  = $input['pain_point']  ?? '';
+$objection  = $input['objection']   ?? '';
+$objectionText = $input['objection_text'] ?? '';
+$nextStep   = $input['next_step']   ?? '';
+$decisionMaker = $input['decision_maker'] ?? '';
+$nextCallDate  = $input['next_call_date']  ?? '';
+$nextCallTime  = $input['next_call_time']  ?? '';
+$freeComment   = $input['free_comment']    ?? '';
 
-function getGigaChatToken() {
-    $auth = base64_decode(GIGACHAT_AUTH);
-    $ch = curl_init('https://ngw.devices.sberbank.ru:9443/api/v2/oauth');
+if (empty($taskId) || empty($callResult)) {
+    echo json_encode(['error' => 'task_id и call_result обязательны']);
+    exit;
+}
+
+// Собираем комментарий
+$commentParts = [];
+if ($painPoint)      $commentParts[] = "Проблема: $painPoint";
+if ($objection)      $commentParts[] = "Возражение: $objection" . ($objectionText ? " — $objectionText" : '');
+if ($nextStep)       $commentParts[] = "Договорились: $nextStep";
+if ($decisionMaker)  $commentParts[] = "Решение: $decisionMaker";
+if ($nextCallDate && $nextCallTime) $commentParts[] = "Следующий контакт: $nextCallDate $nextCallTime";
+elseif ($nextCallDate) $commentParts[] = "Следующий контакт: $nextCallDate";
+if ($freeComment)    $commentParts[] = "Комментарий: $freeComment";
+
+$commentText = implode(". ", $commentParts);
+
+// === ПРОВЕРКА ЧЕРЕЗ GIGACHAT AI ===
+$validation = validateWithGigaChat($commentText);
+
+// Если ПДН найдены — блокируем сохранение
+if ($validation['has_pdn']) {
+    echo json_encode([
+        'error' => 'Сохранение ПДН возможно только в контактах РИТМ, сохраните данные там. После этого удалите ПДН в комментариях и сохраните.'
+    ]);
+    exit;
+}
+
+// Если текст не релевантен — блокируем
+if (!$validation['is_relevant']) {
+    echo json_encode([
+        'error' => 'Комментарий не связан с продажей эквайринга. ' . $validation['relevance_reason'] . ' Сохранение заблокировано.'
+    ]);
+    exit;
+}
+
+// Используем фрод-скор от GigaChat
+$fraudScore = $validation['fraud_score'];
+
+// === ФУНКЦИЯ ВАЛИДАЦИИ ЧЕРЕЗ GIGACHAT ===
+function validateWithGigaChat($text) {
+    // Fallback: если GigaChat недоступен — локальный расчёт
+    $fallback = [
+        'has_pdn' => false,
+        'pdn_type' => 'нет',
+        'is_relevant' => true,
+        'relevance_reason' => 'локальная проверка',
+        'fraud_score' => 50,
+        'fraud_reason' => 'Проверка AI недоступна, использован средний скор'
+    ];
+
+    // Проверяем, есть ли config.php с токеном
+    if (!file_exists('config.php')) {
+        return $fallback;
+    }
+    require_once 'config.php';
+    if (!defined('GIGACHAT_AUTH')) {
+        return $fallback;
+    }
+
+    // Получаем access_token
+    $token = getGigaChatToken();
+    if (!$token) {
+        return $fallback;
+    }
+
+    // Формируем промпт (без двойных кавычек внутри одинарных!)
+    $prompt = 'Ты — система проверки комментариев менеджера по продажам эквайринга Сбербанка. Проанализируй комментарий и верни ТОЛЬКО JSON без форматирования и без Markdown: {"has_pdn":true/false,"pdn_type":"фамилия/телефон/инн/email/нет","is_relevant":true/false,"relevance_reason":"причина","fraud_score":0-100,"fraud_reason":"обоснование"} Правила: ФАМИЛИЯ запрещена (Иванов, Петров, Сидоров и т.д.). ИМЯ и ОТЧЕСТВО разрешены (Иван, Петр, Александрович). ТЕЛЕФОН запрещен (10-11 цифр, начинается с 7, 8, +7). ИНН запрещен (10 или 12 цифр подряд). EMAIL запрещен (содержит @). Текст должен быть связан с продажей эквайринга: проблема клиента, возражения, договоренности, следующий шаг. Запрещен произвольный текст не по теме. Комментарий: ' . $text;
+
+    // Отправляем запрос в GigaChat
+    $ch = curl_init('https://gigachat.devices.sberbank.ru/v1/chat/completions');
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, 'scope=GIGACHAT_API_PERS');
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
+        'model' => 'GigaChat',
+        'messages' => [
+            ['role' => 'user', 'content' => $prompt]
+        ],
+        'temperature' => 0.1,
+        'max_tokens' => 500
+    ]));
     curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Content-Type: application/x-www-form-urlencoded',
-        'Accept: application/json',
-        'Authorization: Basic ' . GIGACHAT_AUTH
+        'Authorization: Bearer ' . $token,
+        'Content-Type: application/json'
     ]);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
 
     $response = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
     if ($httpCode !== 200 || !$response) {
-        error_log('GigaChat OAuth error: HTTP ' . $httpCode . ' response: ' . $response);
+        return $fallback;
+    }
+
+    $data = json_decode($response, true);
+    if (!isset($data['choices'][0]['message']['content'])) {
+        return $fallback;
+    }
+
+    $content = $data['choices'][0]['message']['content'];
+
+    // Очищаем от Markdown (```json ... ```)
+    $content = preg_replace('/^```json\s*/i', '', $content);
+    $content = preg_replace('/\s*```$/i', '', $content);
+    $content = trim($content);
+
+    $result = json_decode($content, true);
+    if (!$result || !isset($result['has_pdn'])) {
+        return $fallback;
+    }
+
+    return $result;
+}
+
+// === ФУНКЦИЯ ПОЛУЧЕНИЯ ТОКЕНА GIGACHAT ===
+function getGigaChatToken() {
+    if (!defined('GIGACHAT_AUTH')) {
+        return null;
+    }
+
+    $ch = curl_init('https://ngw.devices.sberbank.ru:9443/api/v2/oauth');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, 'scope=GIGACHAT_API_PERS');
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Authorization: Basic ' . GIGACHAT_AUTH,
+        'Content-Type: application/x-www-form-urlencoded',
+        'Accept: application/json'
+    ]);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+
+    $response = curl_exec($ch);
+    curl_close($ch);
+
+    if (!$response) {
         return null;
     }
 
@@ -58,317 +174,75 @@ function getGigaChatToken() {
     return $data['access_token'] ?? null;
 }
 
-function validateWithGigaChat($text) {
-    $token = getGigaChatToken();
-    if (!$token) {
-        // Если не удалось получить токен — пропускаем проверку (не блокируем)
-        return [
-            'has_pdn' => false,
-            'pdn_type' => 'нет',
-            'is_relevant' => true,
-            'relevance_reason' => 'Проверка недоступна',
-            'fraud_score' => 50,
-            'fraud_reason' => 'Проверка AI недоступна, использован средний скор'
-        ];
-    }
-
-    $prompt = 'Ты — система проверки комментариев менеджера по продажам эквайринга Сбербанка. Проанализируй комментарий и верни ТОЛЬКО JSON без форматирования и без Markdown: {"has_pdn":true/false,"pdn_type":"фамилия/телефон/инн/email/нет","is_relevant":true/false,"relevance_reason":"причина","fraud_score":0-100,"fraud_reason":"обоснование"} Правила: ФАМИЛИЯ запрещена (Иванов, Петров, Сидоров и т.д.). ИМЯ и ОТЧЕСТВО разрешены (Иван, Петр, Александрович). ТЕЛЕФОН запрещен (10-11 цифр, начинается с 7, 8, +7). ИНН запрещен (10 или 12 цифр подряд). EMAIL запрещен (содержит @). Текст должен быть связан с продажей эквайринга: проблема клиента, возражения, договоренности, следующий шаг. Запрещен произвольный текст не по теме. Комментарий: """) . $text . '"""';
-
-    $ch = curl_init('https://gigachat.devices.sberbank.ru/v1/chat/completions');
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
-        'model' => 'GigaChat',
-        'messages' => [
-            ['role' => 'system', 'content' => 'Ты проверяешь комментарии менеджеров. Возвращай ТОЛЬКО JSON.'],
-            ['role' => 'user', 'content' => $prompt]
-        ],
-        'temperature' => 0.1,
-        'max_tokens' => 500
-    ]));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Content-Type: application/json',
-        'Accept: application/json',
-        'Authorization: Bearer ' . $token
-    ]);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    if ($httpCode !== 200 || !$response) {
-        error_log('GigaChat API error: HTTP ' . $httpCode . ' response: ' . $response);
-        return [
-            'has_pdn' => false,
-            'pdn_type' => 'нет',
-            'is_relevant' => true,
-            'relevance_reason' => 'Проверка недоступна',
-            'fraud_score' => 50,
-            'fraud_reason' => 'Проверка AI недоступна, использован средний скор'
-        ];
-    }
-
-    $data = json_decode($response, true);
-    $content = $data['choices'][0]['message']['content'] ?? '';
-
-    // Извлекаем JSON из ответа
-    preg_match('/\{[^}]+\}/', $content, $matches);
-    if ($matches) {
-        $json = json_decode($matches[0], true);
-        if ($json) {
-            return [
-                'has_pdn' => $json['has_pdn'] ?? false,
-                'pdn_type' => $json['pdn_type'] ?? 'нет',
-                'is_relevant' => $json['is_relevant'] ?? true,
-                'relevance_reason' => $json['relevance_reason'] ?? '',
-                'fraud_score' => isset($json['fraud_score']) ? (int)$json['fraud_score'] : 50,
-                'fraud_reason' => $json['fraud_reason'] ?? ''
-            ];
-        }
-    }
-
-    // Если не удалось распарсить JSON
-    return [
-        'has_pdn' => false,
-        'pdn_type' => 'нет',
-        'is_relevant' => true,
-        'relevance_reason' => 'Проверка недоступна',
-        'fraud_score' => 50,
-        'fraud_reason' => 'Не удалось распарсить ответ AI'
-    ];
-}
-
-// Вызываем проверку только если статус требует комментария
-$no_comment_required = ['noanswer', 'contract'];
-$is_no_comment = in_array($status, $no_comment_required);
-
-if (!$is_no_comment && $comment_text) {
-    $validation = validateWithGigaChat($comment_text);
-
-    // Проверка на ПДН
-    if ($validation['has_pdn']) {
-        echo json_encode([
-            'error' => 'Сохранение ПДН возможно только в контактах РИТМ, сохраните данные там. После этого удалите ПДН в комментариях и сохраните.',
-            'pdn_type' => $validation['pdn_type'],
-            'blocked' => true
-        ]);
-        exit;
-    }
-
-    // Проверка на релевантность
-    if (!$validation['is_relevant']) {
-        echo json_encode([
-            'error' => 'Комментарий не связан с продажей эквайринга. ' . $validation['relevance_reason'] . ' Сохранение заблокировано.',
-            'blocked' => true
-        ]);
-        exit;
-    }
-
-    // Фрод-скор от GigaChat
-    $fraud_score = $validation['fraud_score'];
-    $fraud_reason = $validation['fraud_reason'];
-} else {
-    // Для статусов без комментария или если комментарий пустой — локальный расчет
-    $fraud_score = 0;
-    $fraud_reason = '';
-}
-
-// ========== ОСОБЫЕ СТАТУСЫ: не требуют комментария ==========
-if (!$is_no_comment && !$comment_text) {
-    echo json_encode(['error' => 'Нет данных']);
-    exit;
-}
-
-// Для "Недозвона" — минимальный комментарий автоматически
-if ($status === 'noanswer' && !$comment_text) {
-    $comment_text = 'Недозвон';
-}
-
-// ========== ПОДСЧЁТ ЗВОНКОВ ПО ЗАДАЧЕ ==========
-$stmt = $pdo->prepare("SELECT COUNT(*) FROM call_comments WHERE task_id = ?");
-$stmt->execute([$task_id]);
-$call_count = (int)$stmt->fetchColumn() + 1; // +1 текущий
-
-// ========== ФРОД-СКОР (если не получили от GigaChat) ==========
-if ($fraud_score === 0 && !$is_no_comment) {
-    // Локальный расчет как fallback
-    $fraud_score = 0;
-
-    // 1. Длина комментария (0-20 баллов)
-    $len = mb_strlen($comment_text);
-    if ($len > 300) $fraud_score += 20;
-    elseif ($len > 150) $fraud_score += 15;
-    elseif ($len > 80) $fraud_score += 10;
-    else $fraud_score += 5;
-
-    // 2. Заполнены все обязательные поля (0-20 баллов)
-    $filled = 0;
-    if ($pain_point) $filled++;
-    if ($objection) $filled++;
-    if ($next_step) $filled++;
-    if ($decision_maker) $filled++;
-    $fraud_score += ($filled / 4) * 20;
-
-    // 3. Детализация возражения (0-15 баллов)
-    if ($objection_text && mb_strlen($objection_text) > 30) $fraud_score += 15;
-    elseif ($objection_text) $fraud_score += 8;
-
-    // 4. Конкретность договорённостей (0-15 баллов)
-    if (mb_strlen($next_step) > 40) $fraud_score += 15;
-    elseif (mb_strlen($next_step) > 20) $fraud_score += 10;
-    else $fraud_score += 5;
-
-    // 5. Наличие даты следующего контакта (0-10 баллов)
-    if ($next_call_date) $fraud_score += 10;
-
-    // 6. Свободный комментарий (0-10 баллов)
-    if ($free_comment && mb_strlen($free_comment) > 20) $fraud_score += 10;
-    elseif ($free_comment) $fraud_score += 5;
-
-    // 7. Проверка на паттерны фрода (штраф)
-    $lower = mb_strtolower($comment_text);
-
-    // Односложные комментарии
-    if (preg_match('/^(да|нет|ок|понятно|ясно|хорошо|спасибо|в работе|дозвон|не ответил|недоступен)[\.!]*$/iu', $comment_text)) {
-        $fraud_score -= 30;
-    }
-
-    // Копипаст — проверяем последние 3 комментария этого менеджера
-    $stmt = $pdo->prepare("SELECT comment_text FROM call_comments WHERE user_id = ? ORDER BY created_at DESC LIMIT 3");
-    $stmt->execute([$user_id]);
-    $recent = $stmt->fetchAll(PDO::FETCH_COLUMN);
-    foreach ($recent as $r) {
-        similar_text($comment_text, $r, $sim);
-        if ($sim > 80) {
-            $fraud_score -= 25;
-            break;
-        }
-    }
-
-    // Подозрительные фразы
-    $suspicious = ['не помню', 'звонил', 'не дозвонился', 'не отвечает', 'занят', 'перезвоню', 'позже'];
-    $susp_count = 0;
-    foreach ($suspicious as $s) {
-        if (mb_stripos($lower, $s) !== false) $susp_count++;
-    }
-    if ($susp_count >= 3) $fraud_score -= 15;
-
-    $fraud_reason = 'Локальный расчет (AI недоступен)';
-}
-
-// ========== ОСОБЫЕ ПРАВИЛА ДЛЯ НОВЫХ СТАТУСОВ ==========
-
-// "Недозвон" — минимальный фрод-скор (10-30), не идёт на контроль
-if ($status === 'noanswer') {
-    $fraud_score = max(10, min(30, $fraud_score));
-}
-
-// "Договор заключён" — максимальный фрод-скор (80-100), не идёт на контроль
-if ($status === 'contract') {
-    $fraud_score = max(80, min(100, $fraud_score));
-}
-
-// "Отказ" — средний фрод-скор, идёт на контроль РОПа
-if ($status === 'reject') {
-    $fraud_score = max(20, min(60, $fraud_score));
-}
-
-// Ограничиваем 0-100
-$fraud_score = max(0, min(100, round($fraud_score)));
-
-// ========== РЕШЕНИЕ О РОП-КОНТРОЛЕ ==========
-// На контроль: скор < 60 ИЛИ статус "Отказ"
-$rop_control = ($fraud_score < 60 || $status === 'reject');
-
-// ========== ОПРЕДЕЛЕНИЕ СТАТУСОВ ЗАДАЧИ ==========
-$new_status = 'Назначена';
-$top_status = 'active';
-
-if ($status === 'contract') {
-    $new_status = 'Договор заключён';
-    $top_status = 'signed';
-} elseif ($status === 'reject') {
-    $new_status = 'На контроле РОП';
-    $top_status = 'active'; // Пока на контроле
-} elseif ($status === 'noanswer') {
-    $new_status = 'Назначена'; // Остаётся в пуле
-    $top_status = 'active';
-} elseif ($rop_control) {
-    $new_status = 'На контроле РОП';
-    $top_status = 'active';
-} else {
-    $new_status = 'Подтверждена';
-    $top_status = 'active';
-}
-
-// ========== РАСЧЁТ ГОТОВНОСТИ СДЕЛКИ ==========
-$readiness = 0;
-if ($status === 'contract') $readiness = 100;
-elseif ($status === 'reject') $readiness = 0;
-else {
-    $keywords = [
-        'инн' => 10, 'телефон' => 10, 'email' => 10,
-        'договор' => 25, 'подписать' => 25, 'согласен' => 25,
-        'сбербизнес' => 10, '1с' => 10, 'кп' => 15,
-        'встреча' => 15, 'презентация' => 15, 'демо' => 15
-    ];
-    foreach ($keywords as $word => $points) {
-        if (mb_stripos($lower, $word) !== false) $readiness += $points;
-    }
-    $readiness = min(100, $readiness);
-}
-
-// ========== СОХРАНЕНИЕ ==========
+// === СОХРАНЕНИЕ В БАЗУ ===
 try {
     $pdo->beginTransaction();
 
+    // Считаем порядковый номер звонка
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM call_comments WHERE task_id = ?");
+    $stmt->execute([$taskId]);
+    $callCount = $stmt->fetchColumn() + 1;
+
+    // Определяем top_status
+    $topStatus = 'active';
+    if ($callResult === 'contract' || $callResult === 'signed') {
+        $topStatus = 'signed';
+    } elseif ($callResult === 'reject') {
+        $topStatus = 'rejected_confirmed';
+    } elseif ($callResult === 'think') {
+        $topStatus = 'think';
+    }
+
     // Сохраняем комментарий
     $stmt = $pdo->prepare("
-        INSERT INTO call_comments 
-        (task_id, user_id, comment_text, call_result, next_call_date, deal_readiness, created_at, call_count)
-        VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
+        INSERT INTO call_comments (task_id, user_id, call_result, comment_text, fraud_score, call_count, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
     ");
-    $stmt->execute([$task_id, $user_id, $comment_text, $status, $next_call_date, $readiness, $call_count]);
+    $stmt->execute([$taskId, $userId, $callResult, $commentText, $fraudScore, $callCount]);
 
-    // Обновляем статус задачи и счётчики
+    // Обновляем задачу
     $stmt = $pdo->prepare("
-        UPDATE epk_tasks 
-        SET status = ?, 
-            next_call_date = ?, 
-            updated_at = datetime('now'),
+        UPDATE epk_tasks SET
+            status = ?,
+            top_status = ?,
             call_count = call_count + 1,
-            top_status = CASE WHEN top_status = 'active' THEN ? ELSE top_status END,
-            first_status_at = CASE 
-                WHEN first_status_at IS NULL AND ? != 'Назначена' THEN datetime('now') 
-                ELSE first_status_at 
-            END
-        WHERE task_id = ?
+            first_status_at = COALESCE(first_status_at, datetime('now'))
+        WHERE uuid = ?
     ");
-    $stmt->execute([$new_status, $next_call_date, $top_status, $new_status, $task_id]);
+    $status = ($callResult === 'contract') ? 'Договор заключён' :
+              ($callResult === 'reject') ? 'Отказ подтверждён' :
+              ($callResult === 'noanswer') ? 'Недозвон' :
+              ($callResult === 'signed') ? 'Подписан' : 'Подтверждена';
+    $stmt->execute([$status, $topStatus, $taskId]);
 
-    // Если РОП-контроль — добавляем в таблицу контроля
-    if ($rop_control) {
+    // Если фрод-скор < 60 — добавляем в очередь РОПа
+    if ($fraudScore < 60) {
         $stmt = $pdo->prepare("
-            INSERT INTO rop_control_queue 
-            (task_id, user_id, tabel, fraud_score, comment_text, status, top_status, created_at)
-            VALUES (?, ?, ?, ?, ?, 'На проверке', ?, datetime('now'))
+            INSERT OR REPLACE INTO rop_control_queue (task_id, user_id, fraud_score, comment_text, status, top_status, created_at)
+            VALUES (?, ?, ?, ?, 'На проверке', ?, datetime('now'))
         ");
-        $stmt->execute([$task_id, $user_id, $tabel, $fraud_score, $comment_text, $top_status]);
+        $stmt->execute([$taskId, $userId, $fraudScore, $commentText, $topStatus]);
     }
+
+    // Обновляем статистику менеджера
+    $today = date('Y-m-d');
+    $stmt = $pdo->prepare("
+        INSERT INTO manager_call_stats (user_id, call_date, total_calls, fraud_low_count)
+        VALUES (?, ?, 1, ?)
+        ON CONFLICT(user_id, call_date) DO UPDATE SET
+            total_calls = total_calls + 1,
+            fraud_low_count = fraud_low_count + ?
+    ");
+    $isLow = ($fraudScore < 60) ? 1 : 0;
+    $stmt->execute([$userId, $today, $isLow, $isLow]);
 
     $pdo->commit();
 
     echo json_encode([
         'success' => true,
-        'fraud_score' => $fraud_score,
-        'fraud_reason' => $fraud_reason ?? '',
-        'rop_control' => $rop_control,
-        'readiness' => $readiness,
-        'next_call_date' => $next_call_date,
-        'call_count' => $call_count,
-        'new_status' => $new_status,
-        'top_status' => $top_status
+        'fraud_score' => $fraudScore,
+        'call_count' => $callCount,
+        'message' => 'Звонок сохранен'
     ]);
 
 } catch (Exception $e) {

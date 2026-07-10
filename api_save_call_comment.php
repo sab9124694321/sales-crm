@@ -29,10 +29,152 @@ if (!$task_id) {
     exit;
 }
 
-// ========== ОСОБЫЕ СТАТУСЫ: не требуют комментария ==========
+// ========== ПРОВЕРКА ЧЕРЕЗ GIGACHAT AI ==========
+require_once 'config.php';
+
+function getGigaChatToken() {
+    $auth = base64_decode(GIGACHAT_AUTH);
+    $ch = curl_init('https://ngw.devices.sberbank.ru:9443/api/v2/oauth');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, 'scope=GIGACHAT_API_PERS');
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/x-www-form-urlencoded',
+        'Accept: application/json',
+        'Authorization: Basic ' . GIGACHAT_AUTH
+    ]);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($httpCode !== 200 || !$response) {
+        error_log('GigaChat OAuth error: HTTP ' . $httpCode . ' response: ' . $response);
+        return null;
+    }
+
+    $data = json_decode($response, true);
+    return $data['access_token'] ?? null;
+}
+
+function validateWithGigaChat($text) {
+    $token = getGigaChatToken();
+    if (!$token) {
+        // Если не удалось получить токен — пропускаем проверку (не блокируем)
+        return [
+            'has_pdn' => false,
+            'pdn_type' => 'нет',
+            'is_relevant' => true,
+            'relevance_reason' => 'Проверка недоступна',
+            'fraud_score' => 50,
+            'fraud_reason' => 'Проверка AI недоступна, использован средний скор'
+        ];
+    }
+
+    $prompt = 'Ты — система проверки комментариев менеджера по продажам эквайринга Сбербанка. Проанализируй комментарий и верни ТОЛЬКО JSON без форматирования и без Markdown: {"has_pdn":true/false,"pdn_type":"фамилия/телефон/инн/email/нет","is_relevant":true/false,"relevance_reason":"причина","fraud_score":0-100,"fraud_reason":"обоснование"} Правила: ФАМИЛИЯ запрещена (Иванов, Петров, Сидоров и т.д.). ИМЯ и ОТЧЕСТВО разрешены (Иван, Петр, Александрович). ТЕЛЕФОН запрещен (10-11 цифр, начинается с 7, 8, +7). ИНН запрещен (10 или 12 цифр подряд). EMAIL запрещен (содержит @). Текст должен быть связан с продажей эквайринга: проблема клиента, возражения, договоренности, следующий шаг. Запрещен произвольный текст не по теме. Комментарий: """) . $text . '"""';
+
+    $ch = curl_init('https://gigachat.devices.sberbank.ru/v1/chat/completions');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
+        'model' => 'GigaChat',
+        'messages' => [
+            ['role' => 'system', 'content' => 'Ты проверяешь комментарии менеджеров. Возвращай ТОЛЬКО JSON.'],
+            ['role' => 'user', 'content' => $prompt]
+        ],
+        'temperature' => 0.1,
+        'max_tokens' => 500
+    ]));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'Accept: application/json',
+        'Authorization: Bearer ' . $token
+    ]);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($httpCode !== 200 || !$response) {
+        error_log('GigaChat API error: HTTP ' . $httpCode . ' response: ' . $response);
+        return [
+            'has_pdn' => false,
+            'pdn_type' => 'нет',
+            'is_relevant' => true,
+            'relevance_reason' => 'Проверка недоступна',
+            'fraud_score' => 50,
+            'fraud_reason' => 'Проверка AI недоступна, использован средний скор'
+        ];
+    }
+
+    $data = json_decode($response, true);
+    $content = $data['choices'][0]['message']['content'] ?? '';
+
+    // Извлекаем JSON из ответа
+    preg_match('/\{[^}]+\}/', $content, $matches);
+    if ($matches) {
+        $json = json_decode($matches[0], true);
+        if ($json) {
+            return [
+                'has_pdn' => $json['has_pdn'] ?? false,
+                'pdn_type' => $json['pdn_type'] ?? 'нет',
+                'is_relevant' => $json['is_relevant'] ?? true,
+                'relevance_reason' => $json['relevance_reason'] ?? '',
+                'fraud_score' => isset($json['fraud_score']) ? (int)$json['fraud_score'] : 50,
+                'fraud_reason' => $json['fraud_reason'] ?? ''
+            ];
+        }
+    }
+
+    // Если не удалось распарсить JSON
+    return [
+        'has_pdn' => false,
+        'pdn_type' => 'нет',
+        'is_relevant' => true,
+        'relevance_reason' => 'Проверка недоступна',
+        'fraud_score' => 50,
+        'fraud_reason' => 'Не удалось распарсить ответ AI'
+    ];
+}
+
+// Вызываем проверку только если статус требует комментария
 $no_comment_required = ['noanswer', 'contract'];
 $is_no_comment = in_array($status, $no_comment_required);
 
+if (!$is_no_comment && $comment_text) {
+    $validation = validateWithGigaChat($comment_text);
+
+    // Проверка на ПДН
+    if ($validation['has_pdn']) {
+        echo json_encode([
+            'error' => 'Сохранение ПДН возможно только в контактах РИТМ, сохраните данные там. После этого удалите ПДН в комментариях и сохраните.',
+            'pdn_type' => $validation['pdn_type'],
+            'blocked' => true
+        ]);
+        exit;
+    }
+
+    // Проверка на релевантность
+    if (!$validation['is_relevant']) {
+        echo json_encode([
+            'error' => 'Комментарий не связан с продажей эквайринга. ' . $validation['relevance_reason'] . ' Сохранение заблокировано.',
+            'blocked' => true
+        ]);
+        exit;
+    }
+
+    // Фрод-скор от GigaChat
+    $fraud_score = $validation['fraud_score'];
+    $fraud_reason = $validation['fraud_reason'];
+} else {
+    // Для статусов без комментария или если комментарий пустой — локальный расчет
+    $fraud_score = 0;
+    $fraud_reason = '';
+}
+
+// ========== ОСОБЫЕ СТАТУСЫ: не требуют комментария ==========
 if (!$is_no_comment && !$comment_text) {
     echo json_encode(['error' => 'Нет данных']);
     exit;
@@ -48,67 +190,72 @@ $stmt = $pdo->prepare("SELECT COUNT(*) FROM call_comments WHERE task_id = ?");
 $stmt->execute([$task_id]);
 $call_count = (int)$stmt->fetchColumn() + 1; // +1 текущий
 
-// ========== ФРОД-СКОР (0-100) ==========
-$fraud_score = 0;
+// ========== ФРОД-СКОР (если не получили от GigaChat) ==========
+if ($fraud_score === 0 && !$is_no_comment) {
+    // Локальный расчет как fallback
+    $fraud_score = 0;
 
-// 1. Длина комментария (0-20 баллов)
-$len = mb_strlen($comment_text);
-if ($len > 300) $fraud_score += 20;
-elseif ($len > 150) $fraud_score += 15;
-elseif ($len > 80) $fraud_score += 10;
-else $fraud_score += 5;
+    // 1. Длина комментария (0-20 баллов)
+    $len = mb_strlen($comment_text);
+    if ($len > 300) $fraud_score += 20;
+    elseif ($len > 150) $fraud_score += 15;
+    elseif ($len > 80) $fraud_score += 10;
+    else $fraud_score += 5;
 
-// 2. Заполнены все обязательные поля (0-20 баллов)
-$filled = 0;
-if ($pain_point) $filled++;
-if ($objection) $filled++;
-if ($next_step) $filled++;
-if ($decision_maker) $filled++;
-$fraud_score += ($filled / 4) * 20;
+    // 2. Заполнены все обязательные поля (0-20 баллов)
+    $filled = 0;
+    if ($pain_point) $filled++;
+    if ($objection) $filled++;
+    if ($next_step) $filled++;
+    if ($decision_maker) $filled++;
+    $fraud_score += ($filled / 4) * 20;
 
-// 3. Детализация возражения (0-15 баллов)
-if ($objection_text && mb_strlen($objection_text) > 30) $fraud_score += 15;
-elseif ($objection_text) $fraud_score += 8;
+    // 3. Детализация возражения (0-15 баллов)
+    if ($objection_text && mb_strlen($objection_text) > 30) $fraud_score += 15;
+    elseif ($objection_text) $fraud_score += 8;
 
-// 4. Конкретность договорённостей (0-15 баллов)
-if (mb_strlen($next_step) > 40) $fraud_score += 15;
-elseif (mb_strlen($next_step) > 20) $fraud_score += 10;
-else $fraud_score += 5;
+    // 4. Конкретность договорённостей (0-15 баллов)
+    if (mb_strlen($next_step) > 40) $fraud_score += 15;
+    elseif (mb_strlen($next_step) > 20) $fraud_score += 10;
+    else $fraud_score += 5;
 
-// 5. Наличие даты следующего контакта (0-10 баллов)
-if ($next_call_date) $fraud_score += 10;
+    // 5. Наличие даты следующего контакта (0-10 баллов)
+    if ($next_call_date) $fraud_score += 10;
 
-// 6. Свободный комментарий (0-10 баллов)
-if ($free_comment && mb_strlen($free_comment) > 20) $fraud_score += 10;
-elseif ($free_comment) $fraud_score += 5;
+    // 6. Свободный комментарий (0-10 баллов)
+    if ($free_comment && mb_strlen($free_comment) > 20) $fraud_score += 10;
+    elseif ($free_comment) $fraud_score += 5;
 
-// 7. Проверка на паттерны фрода (штраф)
-$lower = mb_strtolower($comment_text);
+    // 7. Проверка на паттерны фрода (штраф)
+    $lower = mb_strtolower($comment_text);
 
-// Односложные комментарии
-if (preg_match('/^(да|нет|ок|понятно|ясно|хорошо|спасибо|в работе|дозвон|не ответил|недоступен)[\.!]*$/iu', $comment_text)) {
-    $fraud_score -= 30;
-}
-
-// Копипаст — проверяем последние 3 комментария этого менеджера
-$stmt = $pdo->prepare("SELECT comment_text FROM call_comments WHERE user_id = ? ORDER BY created_at DESC LIMIT 3");
-$stmt->execute([$user_id]);
-$recent = $stmt->fetchAll(PDO::FETCH_COLUMN);
-foreach ($recent as $r) {
-    similar_text($comment_text, $r, $sim);
-    if ($sim > 80) {
-        $fraud_score -= 25;
-        break;
+    // Односложные комментарии
+    if (preg_match('/^(да|нет|ок|понятно|ясно|хорошо|спасибо|в работе|дозвон|не ответил|недоступен)[\.!]*$/iu', $comment_text)) {
+        $fraud_score -= 30;
     }
-}
 
-// Подозрительные фразы
-$suspicious = ['не помню', 'звонил', 'не дозвонился', 'не отвечает', 'занят', 'перезвоню', 'позже'];
-$susp_count = 0;
-foreach ($suspicious as $s) {
-    if (mb_stripos($lower, $s) !== false) $susp_count++;
+    // Копипаст — проверяем последние 3 комментария этого менеджера
+    $stmt = $pdo->prepare("SELECT comment_text FROM call_comments WHERE user_id = ? ORDER BY created_at DESC LIMIT 3");
+    $stmt->execute([$user_id]);
+    $recent = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    foreach ($recent as $r) {
+        similar_text($comment_text, $r, $sim);
+        if ($sim > 80) {
+            $fraud_score -= 25;
+            break;
+        }
+    }
+
+    // Подозрительные фразы
+    $suspicious = ['не помню', 'звонил', 'не дозвонился', 'не отвечает', 'занят', 'перезвоню', 'позже'];
+    $susp_count = 0;
+    foreach ($suspicious as $s) {
+        if (mb_stripos($lower, $s) !== false) $susp_count++;
+    }
+    if ($susp_count >= 3) $fraud_score -= 15;
+
+    $fraud_reason = 'Локальный расчет (AI недоступен)';
 }
-if ($susp_count >= 3) $fraud_score -= 15;
 
 // ========== ОСОБЫЕ ПРАВИЛА ДЛЯ НОВЫХ СТАТУСОВ ==========
 
@@ -185,7 +332,6 @@ try {
     $stmt->execute([$task_id, $user_id, $comment_text, $status, $next_call_date, $readiness, $call_count]);
 
     // Обновляем статус задачи и счётчики
-    // first_status_at — только если ещё не установлен и статус не 'Назначена'
     $stmt = $pdo->prepare("
         UPDATE epk_tasks 
         SET status = ?, 
@@ -216,6 +362,7 @@ try {
     echo json_encode([
         'success' => true,
         'fraud_score' => $fraud_score,
+        'fraud_reason' => $fraud_reason ?? '',
         'rop_control' => $rop_control,
         'readiness' => $readiness,
         'next_call_date' => $next_call_date,

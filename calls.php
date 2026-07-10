@@ -425,31 +425,50 @@ function saveCall() {
     const comment = assembleComment();
     if (!comment.trim()) { showToast('Заполните форму'); return; }
 
-    const status = document.getElementById('callStatus').value;
+    const callResult = document.getElementById('callStatus').value;
     const nextDate = document.getElementById('nextCallDate').value;
     const nextTime = document.getElementById('nextCallTime').value;
     const nextCallDateTime = nextDate ? (nextTime ? nextDate + ' ' + nextTime : nextDate) : '';
 
+    // ДИАГНОСТИКА: проверяем данные перед отправкой
+    console.log('=== saveCall() ===');
+    console.log('currentTask:', currentTask);
+    console.log('callResult:', callResult);
+    console.log('comment:', comment.substring(0, 50) + '...');
+
     const data = {
         task_id: currentTask,
-        comment_text: comment,
-        status: status,
-        next_call_date: nextCallDateTime,
+        call_result: callResult,
         pain_point: document.getElementById('painPoint').value,
         objection: document.getElementById('objection').value,
         objection_text: document.getElementById('objectionText').value,
         next_step: document.getElementById('nextStep').value,
         decision_maker: document.getElementById('decisionMaker').value,
+        next_call_date: nextCallDateTime,
         free_comment: document.getElementById('freeComment').value
     };
+
+    console.log('Отправляем:', JSON.stringify(data, null, 2));
 
     fetch('api_save_call_comment.php', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(data)
     })
-    .then(r => r.json())
-    .then(d => {
+    .then(r => {
+        console.log('Ответ сервера (HTTP):', r.status);
+        return r.text();
+    })
+    .then(text => {
+        console.log('Ответ сервера (текст):', text.substring(0, 200));
+        let d;
+        try {
+            d = JSON.parse(text);
+        } catch (e) {
+            console.error('Ошибка парсинга JSON:', e);
+            showToast('Ошибка сервера: ' + text.substring(0, 100));
+            return;
+        }
         if (d.success) {
             // Копируем в буфер (текущий + история)
             const fullText = assembleFullText();
@@ -477,7 +496,10 @@ function saveCall() {
             showToast('Ошибка: ' + (d.error || 'Неизвестная ошибка'));
         }
     })
-    .catch(err => showToast('Ошибка сети: ' + err));
+    .catch(err => {
+        console.error('Ошибка сети:', err);
+        showToast('Ошибка сети: ' + err);
+    });
 }
 
 // ========== ОБНОВИТЬ ЗАДАЧУ В СПИСКЕ (без перезагрузки) ==========

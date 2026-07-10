@@ -209,10 +209,11 @@ try {
             first_status_at = COALESCE(first_status_at, datetime('now'))
         WHERE uuid = ?
     ");
+    // ИСПРАВЛЕНО: вложенный тернарный оператор со скобками + 'Подписан' → 'Согласен'
     $status = ($callResult === 'contract') ? 'Договор заключён' :
-              ($callResult === 'reject') ? 'Отказ подтверждён' :
-              ($callResult === 'noanswer') ? 'Недозвон' :
-              ($callResult === 'signed') ? 'Подписан' : 'Подтверждена';
+              (($callResult === 'reject') ? 'Отказ подтверждён' :
+              (($callResult === 'noanswer') ? 'Недозвон' :
+              (($callResult === 'signed') ? 'Согласен' : 'Подтверждена')));
     $stmt->execute([$status, $topStatus, $taskId]);
 
     // Если фрод-скор < 60 — добавляем в очередь РОПа

@@ -340,11 +340,12 @@ function onStatusChange() {
     const status = document.getElementById('callStatus').value;
     const smartFields = document.getElementById('smartFields');
 
-    // Недозвон и Договор — скрываем smart-форму
-    if (status === 'noanswer' || status === 'contract') {
-        smartFields.style.display = 'none';
-    } else {
+    // Только активные статусы требуют smart-форму
+    const requiredFormStatuses = ['think', 'reject', 'recall'];
+    if (requiredFormStatuses.includes(status)) {
         smartFields.style.display = 'block';
+    } else {
+        smartFields.style.display = 'none';
     }
 
     updateAssembledComment();
@@ -355,9 +356,15 @@ function assembleComment() {
     const status = document.getElementById('callStatus').value;
     const freeComment = document.getElementById('freeComment').value.trim();
 
-    // Для Недозвона и Договора — только свободный комментарий
-    if (status === 'noanswer' || status === 'contract') {
-        return freeComment || (status === 'noanswer' ? 'Недозвон' : 'Согласен');
+    // Технические/финальные статусы — комментарий необязателен
+    if (status === 'noanswer') {
+        return freeComment || 'Недозвон';
+    }
+    if (status === 'signed' || status === 'contract') {
+        return freeComment || 'Согласен';
+    }
+    if (status === 'nocontact') {
+        return freeComment || 'Нет контакта';
     }
 
     const pain = document.getElementById('painPoint').value.trim();
@@ -426,7 +433,14 @@ function copyComment() {
 // ========== СОХРАНИТЬ ЗВОНОК ==========
 function saveCall() {
     const comment = assembleComment();
-    if (!comment.trim()) { showToast('Заполните форму'); return; }
+    const callResult = document.getElementById('callStatus').value;
+
+    // Только активные статусы требуют заполнения формы
+    const requiredFormStatuses = ['think', 'reject', 'recall'];
+    if (requiredFormStatuses.includes(callResult) && !comment.trim()) {
+        showToast('Заполните форму');
+        return;
+    }
 
     const callResult = document.getElementById('callStatus').value;
     const nextDate = document.getElementById('nextCallDate').value;

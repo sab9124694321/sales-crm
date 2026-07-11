@@ -231,17 +231,23 @@ try {
     }
 
     // Обновляем статистику менеджера
-    // Статистика менеджера (без call_date — упрощённая версия)
+    // Получаем табельный номер для manager_call_stats
+    $tabelStmt = $pdo->prepare("SELECT user_tabel FROM epk_tasks WHERE task_id = ?");
+    $tabelStmt->execute([$taskId]);
+    $tabel = $tabelStmt->fetchColumn() ?: 'unknown';
+
     $stmt = $pdo->prepare("
-        INSERT INTO manager_call_stats (user_id, total_calls, fraud_low_count, updated_at)
-        VALUES (?, 1, ?, datetime('now'))
+        INSERT INTO manager_call_stats (user_id, tabel, total_calls, fraud_flags, last_call_date, updated_at)
+        VALUES (?, ?, 1, ?, date('now'), datetime('now'))
         ON CONFLICT(user_id) DO UPDATE SET
+            tabel = excluded.tabel,
             total_calls = total_calls + 1,
-            fraud_low_count = fraud_low_count + ?,
+            fraud_flags = fraud_flags + ?,
+            last_call_date = date('now'),
             updated_at = datetime('now')
     ");
     $isLow = ($fraudScore < 60) ? 1 : 0;
-    $stmt->execute([$userId, $isLow, $isLow]);
+    $stmt->execute([$userId, $tabel, $isLow, $isLow]);
 
     $pdo->commit();
 

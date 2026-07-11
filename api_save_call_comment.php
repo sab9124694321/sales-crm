@@ -207,7 +207,7 @@ try {
             top_status = ?,
             call_count = call_count + 1,
             first_status_at = COALESCE(first_status_at, datetime('now'))
-        WHERE uuid = ?
+        WHERE task_id = ?
     ");
     // ИСПРАВЛЕНО: вложенный тернарный оператор со скобками + 'Подписан' → 'Согласен'
     $status = ($callResult === 'contract') ? 'Договор заключён' :

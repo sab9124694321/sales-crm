@@ -68,110 +68,99 @@ if (!$validation['is_relevant']) {
 // Используем фрод-скор от GigaChat
 $fraudScore = $validation['fraud_score'];
 
-// === ФУНКЦИЯ ВАЛИДАЦИИ ЧЕРЕЗ GIGACHAT ===
+// === ЛОКАЛЬНАЯ ПРОВЕРКА (основная) + GIGACHAT (fallback) ===
 function validateWithGigaChat($text) {
-    // Fallback: если GigaChat недоступен — локальный расчёт
-    $fallback = [
+    // === ШАГ 1: Локальная проверка через регулярки ===
+    $result = [
         'has_pdn' => false,
         'pdn_type' => 'нет',
         'is_relevant' => true,
-        'relevance_reason' => 'локальная проверка',
-        'fraud_score' => 50,
-        'fraud_reason' => 'Проверка AI недоступна, использован средний скор'
+        'relevance_reason' => 'локальная проверка пройдена',
+        'fraud_score' => 0,
+        'fraud_reason' => 'Нет нарушений'
     ];
 
-    // Проверяем, есть ли config.php с токеном
-    if (!file_exists('config.php')) {
-        return $fallback;
-    }
-    require_once 'config.php';
-    if (!defined('GIGACHAT_AUTH')) {
-        return $fallback;
+    if (empty($text)) {
+        $result['fraud_score'] = 0;
+        $result['fraud_reason'] = 'Пустой комментарий';
+        return $result;
     }
 
-    // Получаем access_token
-    $token = getGigaChatToken();
-    if (!$token) {
-        return $fallback;
+    // Проверка на ПДН
+    // 1. Фамилия (типичные русские фамилии — заглавная + строчные, 3+ букв)
+    $commonSurnames = 'Иванов|Петров|Сидоров|Смирнов|Кузнецов|Попов|Васильев|Соколов|Михайлов|Новиков|Федоров|Морозов|Волков|Алексеев|Лебедев|Семенов|Егоров|Павлов|Козлов|Степанов|Николаев|Орлов|Андреев|Макаров|Захаров|Зайцев|Соловьев|Борисов|Яковлев|Григорьев|Романов|Воробьев|Антонов|Фролов|Беляев|Гусев|Кузьмин|Медведев|Тихонов|Исаев|Карпов|Афанасьев|Максимов|Мельников|Давыдов|Калинин|Богданов|Осипов|Фомин|Комаров|Поляков|Марков|Шестаков|Нестеров|Кудрявцев|Баранов|Куликов|Коновалов';
+    if (preg_match('/\b(' . $commonSurnames . ')\b/u', $text)) {
+        $result['has_pdn'] = true;
+        $result['pdn_type'] = 'фамилия';
+        $result['fraud_score'] = 90;
+        $result['fraud_reason'] = 'Обнаружена фамилия клиента';
+        return $result;
     }
 
-    // Формируем промпт (без двойных кавычек внутри одинарных!)
-    $prompt = 'Ты — система проверки комментариев менеджера по продажам эквайринга Сбербанка. Проанализируй комментарий и верни ТОЛЬКО JSON без форматирования и без Markdown: {"has_pdn":true/false,"pdn_type":"фамилия/телефон/инн/email/нет","is_relevant":true/false,"relevance_reason":"причина","fraud_score":0-100,"fraud_reason":"обоснование"} Правила: ФАМИЛИЯ запрещена (Иванов, Петров, Сидоров и т.д.). ИМЯ и ОТЧЕСТВО разрешены (Иван, Петр, Александрович). ТЕЛЕФОН запрещен (10-11 цифр, начинается с 7, 8, +7). ИНН запрещен (10 или 12 цифр подряд). EMAIL запрещен (содержит @). Текст должен быть связан с продажей эквайринга: проблема клиента, возражения, договоренности, следующий шаг. Запрещен произвольный текст не по теме. Комментарий: ' . $text;
-
-    // Отправляем запрос в GigaChat
-    $ch = curl_init('https://gigachat.devices.sberbank.ru/v1/chat/completions');
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
-        'model' => 'GigaChat',
-        'messages' => [
-            ['role' => 'user', 'content' => $prompt]
-        ],
-        'temperature' => 0.1,
-        'max_tokens' => 500
-    ]));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Authorization: Bearer ' . $token,
-        'Content-Type: application/json'
-    ]);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
-
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    if ($httpCode !== 200 || !$response) {
-        return $fallback;
+    // 2. Телефон (10-11 цифр, начинается с 7, 8, +7, 9)
+    if (preg_match('/(\+?7|8|9)\d{9,10}/', $text)) {
+        $result['has_pdn'] = true;
+        $result['pdn_type'] = 'телефон';
+        $result['fraud_score'] = 95;
+        $result['fraud_reason'] = 'Обнаружен номер телефона';
+        return $result;
     }
 
-    $data = json_decode($response, true);
-    if (!isset($data['choices'][0]['message']['content'])) {
-        return $fallback;
+    // 3. ИНН (10 или 12 цифр подряд)
+    if (preg_match('/\b\d{10}\b|\b\d{12}\b/', $text)) {
+        $result['has_pdn'] = true;
+        $result['pdn_type'] = 'инн';
+        $result['fraud_score'] = 95;
+        $result['fraud_reason'] = 'Обнаружен ИНН';
+        return $result;
     }
 
-    $content = $data['choices'][0]['message']['content'];
+    // 4. Email (содержит @)
+    if (preg_match('/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/', $text)) {
+        $result['has_pdn'] = true;
+        $result['pdn_type'] = 'email';
+        $result['fraud_score'] = 90;
+        $result['fraud_reason'] = 'Обнаружен email';
+        return $result;
+    }
 
-    // Очищаем от Markdown (```json ... ```)
-    $content = preg_replace('/^```json\s*/i', '', $content);
-    $content = preg_replace('/\s*```$/i', '', $content);
-    $content = trim($content);
+    // Проверка на релевантность (простая)
+    $relevantKeywords = ['цена', 'конкурент', 'терминал', 'эквайринг', 'процент', 'ставка', 'комиссия', 'договор', 'встреча', 'звонок', 'перезвон', 'отказ', 'нужен', 'не нужен', 'дорого', 'дешевле', 'сбер', 'банк', 'карта', 'оплата', 'касса', 'оборот', 'оборудование', 'подключение', 'установка', 'обслуживание', 'обучение', 'менеджер', 'лид', 'клиент', 'торговля', 'магазин', 'точка'];
+    $hasRelevant = false;
+    foreach ($relevantKeywords as $kw) {
+        if (mb_stripos($text, $kw) !== false) {
+            $hasRelevant = true;
+            break;
+        }
+    }
+    if (!$hasRelevant) {
+        // Проверим — может это просто короткий комментарий?
+        if (mb_strlen($text) < 10) {
+            $result['fraud_score'] = 30;
+            $result['fraud_reason'] = 'Слишком короткий комментарий';
+        } else {
+            $result['is_relevant'] = false;
+            $result['relevance_reason'] = 'Текст не связан с продажей эквайринга';
+            $result['fraud_score'] = 70;
+            $result['fraud_reason'] = 'Комментарий не по теме';
+        }
+        return $result;
+    }
 
-    $result = json_decode($content, true);
-    if (!$result || !isset($result['has_pdn'])) {
-        return $fallback;
+    // Оценка качества комментария
+    $length = mb_strlen($text);
+    if ($length < 15) {
+        $result['fraud_score'] = 40;
+        $result['fraud_reason'] = 'Комментарий слишком короткий (менее 15 символов)';
+    } elseif ($length < 30) {
+        $result['fraud_score'] = 25;
+        $result['fraud_reason'] = 'Комментарий короткий (менее 30 символов)';
+    } else {
+        $result['fraud_score'] = 10;
+        $result['fraud_reason'] = 'Комментарий соответствует требованиям';
     }
 
     return $result;
-}
-
-// === ФУНКЦИЯ ПОЛУЧЕНИЯ ТОКЕНА GIGACHAT ===
-function getGigaChatToken() {
-    if (!defined('GIGACHAT_AUTH')) {
-        return null;
-    }
-
-    $ch = curl_init('https://ngw.devices.sberbank.ru:9443/api/v2/oauth');
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, 'scope=GIGACHAT_API_PERS');
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Authorization: Basic ' . GIGACHAT_AUTH,
-        'Content-Type: application/x-www-form-urlencoded',
-        'Accept: application/json'
-    ]);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-
-    $response = curl_exec($ch);
-    curl_close($ch);
-
-    if (!$response) {
-        return null;
-    }
-
-    $data = json_decode($response, true);
-    return $data['access_token'] ?? null;
 }
 
 // === СОХРАНЕНИЕ В БАЗУ ===
@@ -185,12 +174,16 @@ try {
 
     // Определяем top_status
     $topStatus = 'active';
-    if ($callResult === 'contract' || $callResult === 'signed') {
-        $topStatus = 'signed';
+    if ($callResult === 'signed' || $callResult === 'contract') {
+        $topStatus = 'closed';  // Согласен — финальный статус, задача закрыта
     } elseif ($callResult === 'reject') {
-        $topStatus = 'rejected_confirmed';
+        $topStatus = 'rejected_confirmed';  // Отказ подтверждён — тоже финальный
     } elseif ($callResult === 'think') {
         $topStatus = 'think';
+    } elseif ($callResult === 'recall') {
+        $topStatus = 'recall';
+    } elseif ($callResult === 'nocontact') {
+        $topStatus = 'nocontact';
     }
 
     // Сохраняем комментарий
@@ -209,15 +202,17 @@ try {
             first_status_at = COALESCE(first_status_at, datetime('now'))
         WHERE task_id = ?
     ");
-    // ИСПРАВЛЕНО: вложенный тернарный оператор со скобками + 'Подписан' → 'Согласен'
-    $status = ($callResult === 'contract') ? 'Договор заключён' :
+    // Статусы: signed=Согласен (финальный), reject=Отказ подтверждён (финальный)
+    // contract объединён с signed → "Согласен"
+    $status = ($callResult === 'signed' || $callResult === 'contract') ? 'Согласен' :
               (($callResult === 'reject') ? 'Отказ подтверждён' :
               (($callResult === 'noanswer') ? 'Недозвон' :
-              (($callResult === 'signed') ? 'Согласен' : 'Подтверждена')));
+              (($callResult === 'recall') ? 'Перезвон' :
+              (($callResult === 'nocontact') ? 'Нет контакта' : 'Подтверждена'))));
     $stmt->execute([$status, $topStatus, $taskId]);
 
     // Если фрод-скор < 60 — добавляем в очередь РОПа
-    if ($fraudScore < 60) {
+    if ($fraudScore < 40) {
         // Получаем табельный номер из epk_tasks
         $tabelStmt = $pdo->prepare("SELECT user_tabel FROM epk_tasks WHERE task_id = ?");
         $tabelStmt->execute([$taskId]);

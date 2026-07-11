@@ -226,7 +226,7 @@ $competitive = [
                     <div class="form-section-title">Результат звонка</div>
                     <select id="callStatus" onchange="onStatusChange()">
                         <option value="think">Думает</option>
-                        <option value="signed">Подписан</option>
+                        <option value="signed">Согласен</option>
                         <option value="reject">Отказ</option>
                         <option value="noanswer">Недозвон</option>
                         <option value="contract">Согласен (договор)</option>
@@ -401,7 +401,7 @@ function assembleFullText() {
         fullText += '\n\n--- История звонков ---';
         commentHistory.forEach((h) => {
             const statusMap = {
-                think: 'Думает', signed: 'Подписан', reject: 'Отказ',
+                think: 'Думает', signed: 'Согласен', reject: 'Отказ',
                 nocontact: 'Нет контакта', recall: 'Перезвон',
                 noanswer: 'Недозвон', contract: 'Договор'
             };
@@ -577,7 +577,7 @@ function loadHistory(taskId) {
             list.innerHTML = commentHistory.map(h => {
                 const statusClass = h.call_result || 'think';
                 const statusMap = {
-                    think: 'Думает', signed: 'Подписан', reject: 'Отказ', 
+                    think: 'Думает', signed: 'Согласен', reject: 'Отказ', 
                     nocontact: 'Нет контакта', recall: 'Перезвон',
                     noanswer: 'Недозвон', contract: 'Договор'
                 };

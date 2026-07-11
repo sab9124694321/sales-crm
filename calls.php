@@ -340,8 +340,9 @@ function onStatusChange() {
     const status = document.getElementById('callStatus').value;
     const smartFields = document.getElementById('smartFields');
 
-    // Недозвон и Договор — скрываем smart-форму
-    if (status === 'noanswer' || status === 'contract') {
+    // Финальные и технические статусы — скрываем smart-форму, комментарий необязателен
+    const optionalStatuses = ['signed', 'contract', 'reject', 'noanswer', 'nocontact'];
+    if (optionalStatuses.includes(status)) {
         smartFields.style.display = 'none';
     } else {
         smartFields.style.display = 'block';
@@ -355,9 +356,18 @@ function assembleComment() {
     const status = document.getElementById('callStatus').value;
     const freeComment = document.getElementById('freeComment').value.trim();
 
-    // Для Недозвона и Договора — только свободный комментарий
-    if (status === 'noanswer' || status === 'contract') {
-        return freeComment || (status === 'noanswer' ? 'Недозвон' : 'Согласен');
+    // Для финальных/технических статусов — комментарий необязателен
+    if (status === 'noanswer') {
+        return freeComment || 'Недозвон';
+    }
+    if (status === 'signed' || status === 'contract') {
+        return freeComment || 'Согласен';
+    }
+    if (status === 'nocontact') {
+        return freeComment || 'Нет контакта';
+    }
+    if (status === 'reject') {
+        return freeComment || 'Отказ';
     }
 
     const pain = document.getElementById('painPoint').value.trim();
@@ -426,7 +436,14 @@ function copyComment() {
 // ========== СОХРАНИТЬ ЗВОНОК ==========
 function saveCall() {
     const comment = assembleComment();
-    if (!comment.trim()) { showToast('Заполните форму'); return; }
+    const callResult = document.getElementById('callStatus').value;
+
+    // Для финальных/технических статусов комментарий необязателен
+    const optionalCommentStatuses = ['signed', 'contract', 'reject', 'noanswer', 'nocontact'];
+    if (!comment.trim() && !optionalCommentStatuses.includes(callResult)) {
+        showToast('Заполните форму');
+        return;
+    }
 
     const callResult = document.getElementById('callStatus').value;
     const nextDate = document.getElementById('nextCallDate').value;

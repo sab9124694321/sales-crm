@@ -218,11 +218,16 @@ try {
 
     // Если фрод-скор < 60 — добавляем в очередь РОПа
     if ($fraudScore < 60) {
+        // Получаем табельный номер из epk_tasks
+        $tabelStmt = $pdo->prepare("SELECT user_tabel FROM epk_tasks WHERE task_id = ?");
+        $tabelStmt->execute([$taskId]);
+        $tabel = $tabelStmt->fetchColumn() ?: 'unknown';
+
         $stmt = $pdo->prepare("
-            INSERT OR REPLACE INTO rop_control_queue (task_id, user_id, fraud_score, comment_text, status, top_status, created_at)
-            VALUES (?, ?, ?, ?, 'На проверке', ?, datetime('now'))
+            INSERT OR REPLACE INTO rop_control_queue (task_id, user_id, tabel, fraud_score, comment_text, status, top_status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'На проверке', ?, datetime('now'))
         ");
-        $stmt->execute([$taskId, $userId, $fraudScore, $commentText, $topStatus]);
+        $stmt->execute([$taskId, $userId, $tabel, $fraudScore, $commentText, $topStatus]);
     }
 
     // Обновляем статистику менеджера

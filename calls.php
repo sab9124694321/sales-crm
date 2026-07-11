@@ -229,7 +229,7 @@ $competitive = [
                         <option value="signed">Согласен</option>
                         <option value="reject">Отказ</option>
                         <option value="noanswer">Недозвон</option>
-                        <option value="contract">Согласен на договор</option>
+                        <option value="contract">Подписан договор</option>
                         <option value="recall">Перезвон</option>
                         <option value="nocontact">Нет контакта</option>
                     </select>

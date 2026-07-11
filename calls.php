@@ -442,7 +442,6 @@ function saveCall() {
         return;
     }
 
-    const callResult = document.getElementById('callStatus').value;
     const nextDate = document.getElementById('nextCallDate').value;
     const nextTime = document.getElementById('nextCallTime').value;
     const nextCallDateTime = nextDate ? (nextTime ? nextDate + ' ' + nextTime : nextDate) : '';

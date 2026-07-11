@@ -53,7 +53,7 @@ function getEmployeeStats($pdo, $emp_id, $emp_tabel, $date_from, $date_to) {
     $stmt = $pdo->prepare("
         SELECT 
             COUNT(*) as total_call_comments,
-            SUM(CASE WHEN call_result = 'contract' THEN 1 ELSE 0 END) as contracts,
+            SUM(CASE WHEN call_result = 'contract' OR call_result = 'signed' THEN 1 ELSE 0 END) as contracts,
             SUM(CASE WHEN call_result = 'reject' THEN 1 ELSE 0 END) as rejects,
             SUM(CASE WHEN call_result = 'think' THEN 1 ELSE 0 END) as thinks,
             SUM(CASE WHEN call_result = 'noanswer' THEN 1 ELSE 0 END) as noanswers,
@@ -236,11 +236,12 @@ if ($is_head) {
     if (!empty($team_ids)) {
         $placeholders = implode(',', array_fill(0, count($team_ids), '?'));
         $sql = "
-            SELECT rcq.*, u.full_name as manager_name, t.name as territory_name
+            SELECT rcq.*, u.full_name as manager_name, t.name as territory_name, et.status as task_status
             FROM rop_control_queue rcq
             LEFT JOIN users u ON rcq.user_id = u.id
             LEFT JOIN users mgr ON u.manager_id = mgr.id
             LEFT JOIN territories t ON mgr.territory_id = t.id
+            LEFT JOIN epk_tasks et ON rcq.task_id = et.task_id
             WHERE rcq.user_id IN ($placeholders)
         ";
         $params = $team_ids;
@@ -255,11 +256,12 @@ if ($is_head) {
     }
 } elseif ($role === 'admin') {
     $sql = "
-        SELECT rcq.*, u.full_name as manager_name, t.name as territory_name
+        SELECT rcq.*, u.full_name as manager_name, t.name as territory_name, et.status as task_status
         FROM rop_control_queue rcq
         LEFT JOIN users u ON rcq.user_id = u.id
         LEFT JOIN users mgr ON u.manager_id = mgr.id
         LEFT JOIN territories t ON mgr.territory_id = t.id
+        LEFT JOIN epk_tasks et ON rcq.task_id = et.task_id
         WHERE 1=1
     ";
     $params = [];
@@ -274,13 +276,13 @@ if ($is_head) {
 }
 
 // --- CSV выгрузка задач (v2.1: добавлен top_status) ---
-if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin')) {
+if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 'territory_head')) {
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename=tasks_' . date('Y-m-d') . '.csv');
     $output = fopen('php://output', 'w');
     fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF)); // BOM
 
-    fputcsv($output, ['ID', 'Задача', 'Менеджер', 'Территория', 'Фрод-скор', 'Статус РОП', 'Верхнеуровневый статус', 'Комментарий', 'Комментарий РОП', 'Дата создания', 'Дата проверки']);
+    fputcsv($output, ['ID', 'Задача', 'Менеджер', 'Территория', 'Фрод-скор', 'Статус РОП', 'Статус задачи', 'Верхнеуровневый статус', 'Комментарий', 'Комментарий РОП', 'Дата создания', 'Дата проверки']);
 
     foreach ($control_tasks as $task) {
         fputcsv($output, [
@@ -290,6 +292,7 @@ if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin')) {
             $task['territory_name'] ?? '',
             $task['fraud_score'],
             $task['status'],
+            $task['task_status'] ?? '',
             $task['top_status'] ?? 'active',
             $task['comment_text'],
             $task['rop_comment'] ?? '',
@@ -302,7 +305,7 @@ if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin')) {
 }
 
 // --- CSV выгрузка статистики ---
-if (isset($_GET['export_stats']) && ($is_head || $role === 'admin')) {
+if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 'territory_head')) {
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename=stats_' . date('Y-m-d') . '.csv');
     $output = fopen('php://output', 'w');

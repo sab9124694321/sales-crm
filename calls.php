@@ -23,11 +23,11 @@ $done_today = $stmt->fetchColumn();
 $remaining = max(0, $daily_plan - $done_today);
 
 // --- Загрузка задач из БД ---
-// v2.1: включаем все статусы кроме завершённых (Договор заключён, Отказ подтверждён)
+// v2.2: включаем все статусы кроме завершённых (Согласен, Отказ подтверждён)
 $stmt = $pdo->prepare("
     SELECT * FROM epk_tasks 
     WHERE user_tabel = ? 
-      AND status NOT IN ('Договор заключён', 'Отказ подтверждён')
+      AND status NOT IN ('Согласен', 'Отказ подтверждён')
     ORDER BY 
         CASE 
             WHEN next_call_date IS NOT NULL AND date(next_call_date) = date('now') THEN 0
@@ -108,6 +108,9 @@ $competitive = [
         .status-rop { background:#fce8e6; color:#c5221f; }
         .status-think { background:#fef3e8; color:#b06000; }
         .status-noanswer { background:#f3e8fd; color:#9334e6; }
+        .status-signed { background:#e6f4ea; color:#188038; }  /* Согласен — зелёный */
+        .status-recall { background:#e8f0fe; color:#1a73e8; }  /* Перезвон — синий */
+        .status-nocontact { background:#fce8e6; color:#c5221f; }  /* Нет контакта — красный */
         .smart-form { display:grid; gap:10px; }
         .smart-form label { font-size:0.8rem; font-weight:500; color:#5f6368; }
         .smart-form input, .smart-form select, .smart-form textarea { padding:8px 12px; border:1px solid #dadce0; border-radius:8px; font-size:0.9rem; width:100%; }
@@ -226,7 +229,7 @@ $competitive = [
                         <option value="signed">Подписан</option>
                         <option value="reject">Отказ</option>
                         <option value="noanswer">Недозвон</option>
-                        <option value="contract">Договор заключён</option>
+                        <option value="contract">Согласен (договор)</option>
                         <option value="recall">Перезвон</option>
                         <option value="nocontact">Нет контакта</option>
                     </select>
@@ -354,7 +357,7 @@ function assembleComment() {
 
     // Для Недозвона и Договора — только свободный комментарий
     if (status === 'noanswer' || status === 'contract') {
-        return freeComment || (status === 'noanswer' ? 'Недозвон' : 'Договор заключён');
+        return freeComment || (status === 'noanswer' ? 'Недозвон' : 'Согласен');
     }
 
     const pain = document.getElementById('painPoint').value.trim();
@@ -484,7 +487,7 @@ function saveCall() {
             updateTaskInList(currentTask, d.new_status, d.call_count);
 
             // Если задача завершена — убираем из списка
-            if (d.new_status === 'Договор заключён' || d.new_status === 'Отказ подтверждён') {
+            if (d.new_status === 'Согласен' || d.new_status === 'Отказ подтверждён') {
                 removeTaskFromList(currentTask);
                 document.getElementById('formContent').style.display = 'none';
                 document.getElementById('formTitle').textContent = 'Выберите задачу';

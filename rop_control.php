@@ -275,7 +275,7 @@ if ($is_head) {
     $control_tasks = $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
 
-// --- CSV выгрузка задач (v2.1: добавлен top_status) ---
+// --- CSV выгрузка задач (v2.3: все задачи для термена/админа) ---
 if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 'territory_head')) {
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename=tasks_' . date('Y-m-d') . '.csv');
@@ -284,7 +284,50 @@ if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 
 
     fputcsv($output, ['ID', 'Задача', 'Менеджер', 'Территория', 'Фрод-скор', 'Статус РОП', 'Статус задачи', 'Верхнеуровневый статус', 'Комментарий', 'Комментарий РОП', 'Дата создания', 'Дата проверки']);
 
-    foreach ($control_tasks as $task) {
+    // Отдельный SQL-запрос для CSV — выбирает ВСЕ задачи команды/всех территорий
+    if ($role === 'territory_head' || $role === 'admin') {
+        // Термен и админ видят ВСЕ задачи всех территорий
+        $csv_sql = "
+            SELECT rcq.*, u.full_name as manager_name, t.name as territory_name, et.status as task_status
+            FROM rop_control_queue rcq
+            LEFT JOIN users u ON rcq.user_id = u.id
+            LEFT JOIN users mgr ON u.manager_id = mgr.id
+            LEFT JOIN territories t ON mgr.territory_id = t.id
+            LEFT JOIN epk_tasks et ON rcq.task_id = et.task_id
+            WHERE 1=1
+        ";
+        $csv_params = [];
+    } else {
+        // Начальник — ВСЕ задачи своей команды (все статусы, не только отфильтрованные на странице)
+        $team_ids = array_column($employees, 'id');
+        if (empty($team_ids)) {
+            // Нет команды — выходим
+            fclose($output);
+            exit;
+        }
+        $placeholders = implode(',', array_fill(0, count($team_ids), '?'));
+        $csv_sql = "
+            SELECT rcq.*, u.full_name as manager_name, t.name as territory_name, et.status as task_status
+            FROM rop_control_queue rcq
+            LEFT JOIN users u ON rcq.user_id = u.id
+            LEFT JOIN users mgr ON u.manager_id = mgr.id
+            LEFT JOIN territories t ON mgr.territory_id = t.id
+            LEFT JOIN epk_tasks et ON rcq.task_id = et.task_id
+            WHERE rcq.user_id IN ($placeholders)
+        ";
+        $csv_params = $team_ids;
+    }
+
+    // Фильтр по статусу (если выбран не "Все")
+    if ($filter_status !== 'Все') {
+        $csv_sql .= " AND rcq.status = ?";
+        $csv_params[] = $filter_status;
+    }
+    $csv_sql .= " ORDER BY rcq.created_at DESC";
+    $csv_stmt = $pdo->prepare($csv_sql);
+    $csv_stmt->execute($csv_params);
+
+    while ($task = $csv_stmt->fetch(PDO::FETCH_ASSOC)) {
         fputcsv($output, [
             $task['id'],
             $task['task_id'],

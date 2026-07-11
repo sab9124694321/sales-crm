@@ -231,16 +231,17 @@ try {
     }
 
     // Обновляем статистику менеджера
-    $today = date('Y-m-d');
+    // Статистика менеджера (без call_date — упрощённая версия)
     $stmt = $pdo->prepare("
-        INSERT INTO manager_call_stats (user_id, call_date, total_calls, fraud_low_count)
-        VALUES (?, ?, 1, ?)
-        ON CONFLICT(user_id, call_date) DO UPDATE SET
+        INSERT INTO manager_call_stats (user_id, total_calls, fraud_low_count, updated_at)
+        VALUES (?, 1, ?, datetime('now'))
+        ON CONFLICT(user_id) DO UPDATE SET
             total_calls = total_calls + 1,
-            fraud_low_count = fraud_low_count + ?
+            fraud_low_count = fraud_low_count + ?,
+            updated_at = datetime('now')
     ");
     $isLow = ($fraudScore < 60) ? 1 : 0;
-    $stmt->execute([$userId, $today, $isLow, $isLow]);
+    $stmt->execute([$userId, $isLow, $isLow]);
 
     $pdo->commit();
 

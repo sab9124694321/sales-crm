@@ -422,7 +422,16 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
 .team-period-form input[type="date"] { padding:5px 8px; border-radius:8px; border:1px solid #ccc; font-size:0.85rem; }
 .team-period-form button { background:#1a73e8; color:#fff; border:none; padding:6px 12px; border-radius:8px; cursor:pointer; font-size:0.85rem; }
 .expected-input { width:55px; padding:2px; font-size:0.7rem; }
-@media (max-width:640px){.metrics-grid{grid-template-columns:1fr}.metric-value{font-size:1.6rem}.metric-daily-target{font-size:1.6rem}.navbar{flex-direction:column;gap:8px;align-items:stretch}.form-row{flex-direction:column;gap:12px}}
+.disclaimer-box { background:#f8f9fa; border-radius:16px; padding:16px; margin-top:30px; font-size:0.85rem; color:#333; border:1px solid #dee2e6; }
+.disclaimer-box h4 { margin-top:0; }
+.disclaimer-box ul { columns:2; list-style:none; padding-left:0; }
+.disclaimer-box li { padding:2px 0; }
+.rank-scale { display:flex; flex-wrap:wrap; gap:12px; margin-top:8px; background:#fff; padding:10px; border-radius:12px; border:1px solid #e0e0e0; }
+.rank-item { flex:1; min-width:80px; text-align:center; border-right:1px solid #e0e0e0; padding:0 8px; }
+.rank-item:last-child { border-right:none; }
+.rank-item .rank-name { font-weight:bold; color:#1a1a2e; }
+.rank-item .rank-points { font-size:0.75rem; color:#666; }
+@media (max-width:640px){.metrics-grid{grid-template-columns:1fr}.metric-value{font-size:1.6rem}.metric-daily-target{font-size:1.6rem}.navbar{flex-direction:column;gap:8px;align-items:stretch}.form-row{flex-direction:column;gap:12px}.disclaimer-box ul{columns:1}}
 </style></head>
 <body><div class="container"><div class="navbar">
 <div class="logo">🚀 SZB</div>
@@ -674,7 +683,39 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
     <td><?= number_format((float)($row['turnover']??0), 0, '.', ' ') ?>₽</td>
     <td><?= number_format((float)($row['rko']??0), 0, '.', ' ') ?></td>
     <td><span class="edit-link" onclick="editReport('<?= $row['report_date'] ?>', <?= $row['calls'] ?>, <?= $row['calls_answered'] ?>, <?= $row['meetings'] ?>, <?= $row['contracts'] ?>, <?= $row['registrations'] ?>, <?= $row['smart_cash'] ?>, <?= $row['pos_systems'] ?>, <?= $row['inn_leads'] ?>, <?= $row['teams'] ?>, <?= $row['turnover'] ?>, <?= $row['rko'] ?? 0 ?>)">✏️</span></td>
-            </tr><?php endforeach; ?></tbody></table><?php else: ?><p>Нет отчётов</p><?php endif; ?></div></div>
+            </tr><?php endforeach; ?></tbody></table><?php else: ?><p>Нет отчётов</p><?php endif; ?></div>
+
+<!-- ========== ДИСКЛЕЙМЕР ПО БАЛЛАМ РЕЙТИНГА ========== -->
+<div class="disclaimer-box">
+    <h4>🏅 Цена баллов рейтинга</h4>
+    <p>Баллы начисляются за действия в отчёте (за каждый показатель, если он > 0):</p>
+    <ul>
+        <li>📞 Звонки — 1 балл</li>
+        <li>✅ Дозвоны — 2 балла</li>
+        <li>🤝 Встречи — 3 балла</li>
+        <li>📄 Договоры — 0 баллов (договор на последующие продукты)</li>
+        <li>📝 ТЭ — 5 баллов</li>
+        <li>💳 Смарт — 7 баллов</li>
+        <li>🖥️ ПОС — 10 баллов</li>
+        <li>🍵 ИНН чаевые — 10 баллов</li>
+        <li>👥 Команды — 4 балла</li>
+        <li>💰 Оборот чаевых — 1 балл за каждые 10 000 ₽</li>
+        <li>🏦 РКО — 1 балл (за факт наличия)</li>
+        <li style="color:#d32f2f;">⚠️ Штраф за пустой отчёт (ничего не заполнено) — -5 баллов</li>
+    </ul>
+    <p style="margin-top:8px; font-size:0.8rem; color:#666;">Договоры не дают баллов, так как это договор на последующие продукты.</p>
+
+    <h4 style="margin-top:16px;">📈 Шкала рангов</h4>
+    <div class="rank-scale">
+        <div class="rank-item"><span class="rank-name">Новичок</span><br><span class="rank-points">0–199 баллов</span></div>
+        <div class="rank-item"><span class="rank-name">Охотник</span><br><span class="rank-points">200–499 баллов</span></div>
+        <div class="rank-item"><span class="rank-name">Мастер</span><br><span class="rank-points">500–999 баллов</span></div>
+        <div class="rank-item"><span class="rank-name">Эксперт</span><br><span class="rank-points">1000–1999 баллов</span></div>
+        <div class="rank-item"><span class="rank-name">Легенда</span><br><span class="rank-points">≥2000 баллов</span></div>
+    </div>
+</div>
+
+</div>
 
 <!-- Модальное окно редактирования -->
 <div id="editModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000;">

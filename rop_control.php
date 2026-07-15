@@ -1,4 +1,6 @@
 <?php
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
 session_start();
 if (!isset($_SESSION['user_id'])) { header('Location: login.php'); exit; }
 require_once 'db.php';
@@ -22,9 +24,10 @@ $filter_month = $_GET['month'] ?? date('Y-m');
 $filter_date_from = $_GET['date_from'] ?? date('Y-m-01');
 $filter_date_to = $_GET['date_to'] ?? date('Y-m-d');
 
-// --- Фильтры для контроля ---
+// --- Фильтры ---
 $filter_status = $_GET['status'] ?? 'На проверке';
 $filter_territory = $_GET['territory'] ?? '';
+$filter_employee_tabel = $_GET['filter_employee_tabel'] ?? '';
 
 // --- Функция получения плана звонков ---
 function getCallPlan($pdo, $tabel_num) {
@@ -35,21 +38,18 @@ function getCallPlan($pdo, $tabel_num) {
     return ceil($month_plan / $work_days);
 }
 
-// --- Функция получения статистики сотрудника (v2.1) ---
+// --- Функция получения статистики сотрудника ---
 function getEmployeeStats($pdo, $emp_id, $emp_tabel, $date_from, $date_to) {
     $daily_plan = getCallPlan($pdo, $emp_tabel);
 
-    // Всего задач
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM epk_tasks WHERE user_tabel = ?");
     $stmt->execute([$emp_tabel]);
     $total_tasks = (int)$stmt->fetchColumn();
 
-    // Звонки из daily_reports
     $stmt = $pdo->prepare("SELECT COALESCE(SUM(calls),0) FROM daily_reports WHERE user_id = ? AND report_date BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $calls_done = (int)$stmt->fetchColumn();
 
-    // Статистика из call_comments (новое в v2.1)
     $stmt = $pdo->prepare("
         SELECT 
             COUNT(*) as total_call_comments,
@@ -64,27 +64,22 @@ function getEmployeeStats($pdo, $emp_id, $emp_tabel, $date_from, $date_to) {
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $call_stats = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    // На контроле
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND date(created_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $on_control = (int)$stmt->fetchColumn();
 
-    // Подтверждено
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND status = 'Подтверждено' AND date(checked_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $confirmed = (int)$stmt->fetchColumn();
 
-    // Отклонено
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND status = 'Отклонено' AND date(checked_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $rejected = (int)$stmt->fetchColumn();
 
-    // Перепрозвон
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND status = 'Перепрозвон' AND date(checked_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $recall = (int)$stmt->fetchColumn();
 
-    // Отказ подтверждён (новое в v2.1)
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND status = 'Отказ подтверждён' AND date(checked_at) BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
     $reject_confirmed = (int)$stmt->fetchColumn();
@@ -107,10 +102,10 @@ function getEmployeeStats($pdo, $emp_id, $emp_tabel, $date_from, $date_to) {
     ];
 }
 
-// --- Собираем данные ---
+// --- Сбор данных ---
 $employees = [];
-$heads = [];
 $territories_data = [];
+$employee_filter_options = [];
 
 if ($is_manager) {
     $employees[] = [
@@ -124,6 +119,17 @@ if ($is_manager) {
     $stmt->execute([$user_id]);
     $team = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+    $employee_filter_options = array_map(function($m) {
+        return ['tabel' => $m['tabel_number'], 'name' => $m['full_name']];
+    }, $team);
+    array_unshift($employee_filter_options, ['tabel' => '', 'name' => '— Все —']);
+
+    if (!empty($filter_employee_tabel)) {
+        $team = array_filter($team, function($m) use ($filter_employee_tabel) {
+            return $m['tabel_number'] === $filter_employee_tabel;
+        });
+    }
+
     foreach ($team as $member) {
         $employees[] = [
             'id' => $member['id'],
@@ -133,12 +139,24 @@ if ($is_manager) {
         ];
     }
 } elseif ($is_terman) {
+    // Для термена собираем всех активных менеджеров (для статистики в интерфейсе)
+    $stmt = $pdo->query("SELECT id, full_name, tabel_number FROM users WHERE role IN ('manager', 'mmb_manager', 'ubr_middle') AND is_active = 1 ORDER BY full_name");
+    $all_managers = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($all_managers as $m) {
+        $employees[] = [
+            'id' => $m['id'],
+            'tabel' => $m['tabel_number'],
+            'name' => $m['full_name'],
+            'stats' => getEmployeeStats($pdo, $m['id'], $m['tabel_number'], $filter_date_from, $filter_date_to)
+        ];
+    }
+
+    // Строим иерархию территорий, показываем только начальников УБР (role = 'head')
     $stmt = $pdo->query("SELECT id, name FROM territories WHERE name IS NOT NULL ORDER BY name");
     $territories = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
     foreach ($territories as $territory) {
         $territory_heads = [];
-        $stmt = $pdo->prepare("SELECT id, full_name, tabel_number FROM users WHERE is_active = 1 AND role IN ('head', 'mmb_tp_head') AND territory_id = ? ORDER BY full_name");
+        $stmt = $pdo->prepare("SELECT id, full_name, tabel_number FROM users WHERE is_active = 1 AND role = 'head' AND territory_id = ? ORDER BY full_name");
         $stmt->execute([$territory['id']]);
         $territory_head_list = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -157,7 +175,6 @@ if ($is_manager) {
                 ];
             }
 
-            // Суммы по команде
             $team_totals = [
                 'daily_plan' => 0, 'total_tasks' => 0, 'calls_done' => 0,
                 'total_calls' => 0, 'contracts' => 0, 'rejects' => 0, 'thinks' => 0,
@@ -200,7 +217,7 @@ if ($is_manager) {
     }
 }
 
-// --- Итоги (для head) ---
+// --- Итоги для head ---
 $totals = null;
 if ($is_head && !empty($employees)) {
     $totals = [
@@ -229,7 +246,7 @@ if ($is_head && !empty($employees)) {
     }
 }
 
-// --- Задачи на контроле ---
+// --- Задачи на контроле для head и admin ---
 $control_tasks = [];
 if ($is_head) {
     $team_ids = array_column($employees, 'id');
@@ -255,58 +272,22 @@ if ($is_head) {
         $control_tasks = $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 } elseif ($role === 'admin') {
-    $sql = "
-        SELECT rcq.*, u.full_name as manager_name, t.name as territory_name, et.status as task_status
-        FROM rop_control_queue rcq
-        LEFT JOIN users u ON rcq.user_id = u.id
-        LEFT JOIN users mgr ON u.manager_id = mgr.id
-        LEFT JOIN territories t ON mgr.territory_id = t.id
-        LEFT JOIN epk_tasks et ON rcq.task_id = et.task_id
-        WHERE 1=1
-    ";
-    $params = [];
-    if ($filter_status !== 'Все') {
-        $sql .= " AND rcq.status = ?";
-        $params[] = $filter_status;
+    $stmt = $pdo->query("SELECT id, full_name, tabel_number FROM users WHERE role IN ('manager', 'mmb_manager', 'ubr_middle') AND is_active = 1 ORDER BY full_name");
+    $all_managers = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $employee_filter_options = array_map(function($m) {
+        return ['tabel' => $m['tabel_number'], 'name' => $m['full_name']];
+    }, $all_managers);
+    array_unshift($employee_filter_options, ['tabel' => '', 'name' => '— Все —']);
+
+    if (!empty($filter_employee_tabel)) {
+        $all_managers = array_filter($all_managers, function($m) use ($filter_employee_tabel) {
+            return $m['tabel_number'] === $filter_employee_tabel;
+        });
     }
-    $sql .= " ORDER BY rcq.created_at DESC";
-    $stmt = $pdo->prepare($sql);
-    $stmt->execute($params);
-    $control_tasks = $stmt->fetchAll(PDO::FETCH_ASSOC);
-}
-
-// --- CSV выгрузка задач (v2.3: все задачи для термена/админа) ---
-if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 'territory_head')) {
-    header('Content-Type: text/csv; charset=utf-8');
-    header('Content-Disposition: attachment; filename=tasks_' . date('Y-m-d') . '.csv');
-    $output = fopen('php://output', 'w');
-    fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF)); // BOM
-
-    fputcsv($output, ['ID', 'Задача', 'Менеджер', 'Территория', 'Фрод-скор', 'Статус РОП', 'Статус задачи', 'Верхнеуровневый статус', 'Комментарий', 'Комментарий РОП', 'Дата создания', 'Дата проверки']);
-
-    // Отдельный SQL-запрос для CSV — выбирает ВСЕ задачи команды/всех территорий
-    if ($role === 'territory_head' || $role === 'admin') {
-        // Термен и админ видят ВСЕ задачи всех территорий
-        $csv_sql = "
-            SELECT rcq.*, u.full_name as manager_name, t.name as territory_name, et.status as task_status
-            FROM rop_control_queue rcq
-            LEFT JOIN users u ON rcq.user_id = u.id
-            LEFT JOIN users mgr ON u.manager_id = mgr.id
-            LEFT JOIN territories t ON mgr.territory_id = t.id
-            LEFT JOIN epk_tasks et ON rcq.task_id = et.task_id
-            WHERE 1=1
-        ";
-        $csv_params = [];
-    } else {
-        // Начальник — ВСЕ задачи своей команды (все статусы, не только отфильтрованные на странице)
-        $team_ids = array_column($employees, 'id');
-        if (empty($team_ids)) {
-            // Нет команды — выходим
-            fclose($output);
-            exit;
-        }
-        $placeholders = implode(',', array_fill(0, count($team_ids), '?'));
-        $csv_sql = "
+    $manager_ids = array_column($all_managers, 'id');
+    if (!empty($manager_ids)) {
+        $placeholders = implode(',', array_fill(0, count($manager_ids), '?'));
+        $sql = "
             SELECT rcq.*, u.full_name as manager_name, t.name as territory_name, et.status as task_status
             FROM rop_control_queue rcq
             LEFT JOIN users u ON rcq.user_id = u.id
@@ -315,14 +296,73 @@ if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 
             LEFT JOIN epk_tasks et ON rcq.task_id = et.task_id
             WHERE rcq.user_id IN ($placeholders)
         ";
-        $csv_params = $team_ids;
+        $params = $manager_ids;
+        if ($filter_status !== 'Все') {
+            $sql .= " AND rcq.status = ?";
+            $params[] = $filter_status;
+        }
+        $sql .= " ORDER BY rcq.created_at DESC";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $control_tasks = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+}
+
+// --- CSV ВЫГРУЗКА ЗАДАЧ ---
+if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 'terman')) {
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename=tasks_' . date('Y-m-d') . '.csv');
+    $output = fopen('php://output', 'w');
+    fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
+
+    fputcsv($output, ['ID', 'Задача', 'Менеджер', 'Территория', 'Фрод-скор', 'Статус РОП', 'Статус задачи', 'Верхнеуровневый статус', 'Комментарий', 'Комментарий РОП', 'Дата создания', 'Дата проверки'], ',', '"', '\\');
+
+    $csv_sql = "
+        SELECT rcq.*, u.full_name as manager_name, t.name as territory_name, et.status as task_status
+        FROM rop_control_queue rcq
+        LEFT JOIN users u ON rcq.user_id = u.id
+        LEFT JOIN users mgr ON u.manager_id = mgr.id
+        LEFT JOIN territories t ON mgr.territory_id = t.id
+        LEFT JOIN epk_tasks et ON rcq.task_id = et.task_id
+        WHERE 1=1
+    ";
+    $csv_params = [];
+
+    // Для head — не ограничиваем по датам (выгружаем всё, что видно на странице)
+    if ($is_head) {
+        // Даты не добавляем
+    } else {
+        // Для admin и terman — добавляем даты
+        $csv_sql .= " AND date(rcq.created_at) BETWEEN :date_from AND :date_to";
+        $csv_params[':date_from'] = $filter_date_from;
+        $csv_params[':date_to'] = $filter_date_to;
     }
 
-    // Фильтр по статусу (если выбран не "Все")
+    // Фильтр по статусу (для всех)
     if ($filter_status !== 'Все') {
-        $csv_sql .= " AND rcq.status = ?";
-        $csv_params[] = $filter_status;
+        $csv_sql .= " AND rcq.status = :status";
+        $csv_params[':status'] = $filter_status;
     }
+
+    // Ограничение по команде для начальника
+    if ($is_head) {
+        $team_ids = array_column($employees, 'id');
+        if (!empty($team_ids)) {
+            $placeholders = implode(',', array_fill(0, count($team_ids), '?'));
+            $csv_sql .= " AND rcq.user_id IN ($placeholders)";
+            $csv_params = array_merge($csv_params, $team_ids);
+        } else {
+            // Если нет подчинённых, выгружаем только заголовки
+            $csv_sql .= " AND 1=0";
+        }
+    }
+
+    // Для администратора – фильтр по сотруднику (если выбран)
+    if ($role === 'admin' && !empty($filter_employee_tabel)) {
+        $csv_sql .= " AND u.tabel_number = :employee_tabel";
+        $csv_params[':employee_tabel'] = $filter_employee_tabel;
+    }
+
     $csv_sql .= " ORDER BY rcq.created_at DESC";
     $csv_stmt = $pdo->prepare($csv_sql);
     $csv_stmt->execute($csv_params);
@@ -341,20 +381,20 @@ if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 
             $task['rop_comment'] ?? '',
             $task['created_at'],
             $task['checked_at'] ?? ''
-        ]);
+        ], ',', '"', '\\');
     }
     fclose($output);
     exit;
 }
 
-// --- CSV выгрузка статистики ---
-if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 'territory_head')) {
+// --- CSV ВЫГРУЗКА СТАТИСТИКИ ---
+if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 'terman')) {
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename=stats_' . date('Y-m-d') . '.csv');
     $output = fopen('php://output', 'w');
     fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
 
-    fputcsv($output, ['Сотрудник', 'Табель', 'План/день', 'Задачи', 'Звонки (отчёты)', 'Звонки (модуль)', 'Договоры', 'Отказы', 'Думает', 'Недозвоны', 'Подписания', 'На контроле', 'Подтверждено', 'Отклонено', 'Перепрозвон', 'Отказ подтверждён']);
+    fputcsv($output, ['Сотрудник', 'Табель', 'План/день', 'Задачи', 'Звонки (отчёты)', 'Звонки (модуль)', 'Договоры', 'Отказы', 'Думает', 'Недозвоны', 'Подписания', 'На контроле', 'Подтверждено', 'Отклонено', 'Перепрозвон', 'Отказ подтверждён'], ',', '"', '\\');
 
     if ($is_head) {
         foreach ($employees as $emp) {
@@ -365,7 +405,7 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
                 $s['thinks'], $s['noanswers'], $s['signed_count'],
                 $s['on_control'], $s['confirmed'], $s['rejected'], $s['recall'],
                 $s['reject_confirmed']
-            ]);
+            ], ',', '"', '\\');
         }
         if ($totals) {
             fputcsv($output, [
@@ -374,7 +414,38 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
                 $totals['thinks'], $totals['noanswers'], $totals['signed_count'],
                 $totals['on_control'], $totals['confirmed'], $totals['rejected'], $totals['recall'],
                 $totals['reject_confirmed']
-            ]);
+            ], ',', '"', '\\');
+        }
+    } elseif ($role === 'admin') {
+        $stmt = $pdo->query("SELECT id, full_name, tabel_number FROM users WHERE role IN ('manager', 'mmb_manager', 'ubr_middle') AND is_active = 1 ORDER BY full_name");
+        $all_managers = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        if (!empty($filter_employee_tabel)) {
+            $all_managers = array_filter($all_managers, function($m) use ($filter_employee_tabel) {
+                return $m['tabel_number'] === $filter_employee_tabel;
+            });
+        }
+        foreach ($all_managers as $m) {
+            $s = getEmployeeStats($pdo, $m['id'], $m['tabel_number'], $filter_date_from, $filter_date_to);
+            fputcsv($output, [
+                $m['full_name'], $m['tabel_number'], $s['daily_plan'], $s['total_tasks'],
+                $s['calls_done'], $s['total_calls'], $s['contracts'], $s['rejects'],
+                $s['thinks'], $s['noanswers'], $s['signed_count'],
+                $s['on_control'], $s['confirmed'], $s['rejected'], $s['recall'],
+                $s['reject_confirmed']
+            ], ',', '"', '\\');
+        }
+    } elseif ($role === 'terman') {
+        $stmt = $pdo->query("SELECT id, full_name, tabel_number FROM users WHERE role IN ('manager', 'mmb_manager', 'ubr_middle') AND is_active = 1 ORDER BY full_name");
+        $all_managers = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($all_managers as $m) {
+            $s = getEmployeeStats($pdo, $m['id'], $m['tabel_number'], $filter_date_from, $filter_date_to);
+            fputcsv($output, [
+                $m['full_name'], $m['tabel_number'], $s['daily_plan'], $s['total_tasks'],
+                $s['calls_done'], $s['total_calls'], $s['contracts'], $s['rejects'],
+                $s['thinks'], $s['noanswers'], $s['signed_count'],
+                $s['on_control'], $s['confirmed'], $s['rejected'], $s['recall'],
+                $s['reject_confirmed']
+            ], ',', '"', '\\');
         }
     }
     fclose($output);
@@ -410,7 +481,7 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
         .control-card .comment { font-size:0.85rem; margin-bottom:8px; }
         .control-card .actions { display:flex; gap:6px; flex-wrap:wrap; }
         .comment-field { width:100%; padding:6px; border:1px solid #dadce0; border-radius:6px; font-size:0.8rem; margin-top:6px; }
-        .filters { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+        .filters { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; align-items:center; }
         .filters select, .filters input { padding:6px 10px; border:1px solid #dadce0; border-radius:6px; font-size:0.85rem; }
         .territory-block { margin-bottom:16px; }
         .territory-name { font-weight:600; font-size:1rem; color:#1a73e8; margin-bottom:8px; }
@@ -435,14 +506,15 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
         <span style="margin-left:auto; font-size:0.85rem; color:#5f6368;"><?= htmlspecialchars($user_name) ?></span>
     </div>
 
-    <!-- Фильтры -->
+    <!-- Фильтры (в форме) -->
     <div class="panel">
+        <form method="GET" action="rop_control.php">
         <div class="filters">
-            <input type="month" value="<?= $filter_month ?>" onchange="location.search='?month='+this.value">
-            <input type="date" value="<?= $filter_date_from ?>" onchange="location.search='?date_from='+this.value+'&date_to='+document.querySelector('input[type=date]:nth-of-type(2)').value">
-            <input type="date" value="<?= $filter_date_to ?>">
-            <?php if ($is_head || $role === 'admin'): ?>
-            <select onchange="location.search='?status='+this.value">
+            <input type="month" name="month" value="<?= $filter_month ?>" onchange="this.form.submit()">
+            <input type="date" name="date_from" value="<?= $filter_date_from ?>" onchange="this.form.submit()">
+            <input type="date" name="date_to" value="<?= $filter_date_to ?>" onchange="this.form.submit()">
+            <?php if ($is_head || $role === 'admin' || $role === 'terman'): ?>
+            <select name="status" onchange="this.form.submit()">
                 <option value="На проверке" <?= $filter_status==='На проверке'?'selected':'' ?>>На проверке</option>
                 <option value="Подтверждено" <?= $filter_status==='Подтверждено'?'selected':'' ?>>Подтверждено</option>
                 <option value="Отклонено" <?= $filter_status==='Отклонено'?'selected':'' ?>>Отклонено</option>
@@ -451,22 +523,36 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
                 <option value="Все" <?= $filter_status==='Все'?'selected':'' ?>>Все</option>
             </select>
             <?php endif; ?>
-        </div>
 
-        <?php if ($is_head || $role === 'admin'): ?>
+            <?php if ($is_head || $role === 'admin'): ?>
+            <select name="filter_employee_tabel" onchange="this.form.submit()">
+                <?php foreach ($employee_filter_options as $opt): ?>
+                    <option value="<?= htmlspecialchars($opt['tabel']) ?>" <?= $filter_employee_tabel == $opt['tabel'] ? 'selected' : '' ?>>
+                        <?= htmlspecialchars($opt['name']) ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+            <?php endif; ?>
+        </div>
+        </form>
+
+        <?php if ($is_head || $role === 'admin' || $role === 'terman'): ?>
         <div class="csv-links">
-            <a href="?export_stats=1&date_from=<?= $filter_date_from ?>&date_to=<?= $filter_date_to ?>">Статистика CSV</a>
-            <a href="?export_tasks=1&status=<?= urlencode($filter_status) ?>">Задачи CSV</a>
+            <a href="?export_stats=1&date_from=<?= $filter_date_from ?>&date_to=<?= $filter_date_to ?>&filter_employee_tabel=<?= urlencode($filter_employee_tabel) ?>">Статистика CSV</a>
+            <a href="?export_tasks=1&status=<?= urlencode($filter_status) ?>&date_from=<?= $filter_date_from ?>&date_to=<?= $filter_date_to ?>&filter_employee_tabel=<?= urlencode($filter_employee_tabel) ?>">Задачи CSV</a>
         </div>
         <?php endif; ?>
     </div>
 
-    <!-- Статистика -->
+    <?php
+    // --- Формируем HTML блока статистики (для всех ролей) ---
+    $statisticsHtml = '';
+    ob_start();
+    ?>
     <div class="panel">
         <h3>Статистика</h3>
 
         <?php if ($is_manager): ?>
-        <!-- Менеджер — только своя статистика -->
         <?php $s = $employees[0]['stats']; ?>
         <table>
             <tr>
@@ -493,7 +579,6 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
         </table>
 
         <?php elseif ($is_head): ?>
-        <!-- Руководитель — таблица по команде -->
         <table>
             <tr>
                 <th>Сотрудник</th><th>План/день</th><th>Задачи</th><th>Звонки (отчёты)</th><th>Звонки (модуль)</th>
@@ -539,11 +624,44 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
             </tr>
             <?php endif; ?>
         </table>
+
+        <?php elseif ($is_terman): ?>
+        <table>
+            <tr>
+                <th>Сотрудник</th><th>План/день</th><th>Задачи</th><th>Звонки (отчёты)</th><th>Звонки (модуль)</th>
+                <th>Договоры</th><th>Отказы</th><th>Думает</th><th>Недозвоны</th><th>Подписания</th>
+                <th>На контроле</th><th>Подтверждено</th><th>Отклонено</th><th>Перепрозвон</th><th>Отказ подтверждён</th>
+            </tr>
+            <?php foreach ($employees as $emp): $s = $emp['stats']; ?>
+            <tr>
+                <td><?= htmlspecialchars($emp['name']) ?></td>
+                <td><?= $s['daily_plan'] ?></td>
+                <td><?= $s['total_tasks'] ?></td>
+                <td><?= $s['calls_done'] ?></td>
+                <td><?= $s['total_calls'] ?></td>
+                <td style="color:#188038"><?= $s['contracts'] ?></td>
+                <td style="color:#c5221f"><?= $s['rejects'] ?></td>
+                <td style="color:#b06000"><?= $s['thinks'] ?></td>
+                <td style="color:#9334e6"><?= $s['noanswers'] ?></td>
+                <td style="color:#188038"><?= $s['signed_count'] ?></td>
+                <td style="color:<?= $s['on_control']>0?'#c5221f':'#188038' ?>"><?= $s['on_control'] ?></td>
+                <td style="color:#188038"><?= $s['confirmed'] ?></td>
+                <td style="color:#c5221f"><?= $s['rejected'] ?></td>
+                <td style="color:#1a73e8"><?= $s['recall'] ?></td>
+                <td style="color:#c5221f"><?= $s['reject_confirmed'] ?></td>
+            </tr>
+            <?php endforeach; ?>
+        </table>
         <?php endif; ?>
     </div>
+    <?php
+    $statisticsHtml = ob_get_clean();
+    ?>
+
+    <!-- Для всех, кроме термена, показываем статистику сразу после фильтров -->
+    <?php if (!$is_terman) echo $statisticsHtml; ?>
 
     <?php if ($is_head || $role === 'admin'): ?>
-    <!-- Блок контроля задач -->
     <div class="panel">
         <h3>Задачи на контроле</h3>
         <?php if (empty($control_tasks)): ?>
@@ -581,7 +699,7 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
     <?php endif; ?>
 
     <?php if ($is_terman): ?>
-    <!-- Иерархия территорий -->
+    <!-- Иерархия территорий (только начальники УБР) -->
     <div class="panel">
         <h3>Иерархия территорий</h3>
         <?php foreach ($territories_data as $territory): ?>
@@ -649,6 +767,9 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
         </div>
         <?php endforeach; ?>
     </div>
+
+    <!-- Для термена показываем статистику (всех сотрудников) в самом низу -->
+    <?php echo $statisticsHtml; ?>
     <?php endif; ?>
 </div>
 
@@ -676,15 +797,12 @@ function toggleHeads(territoryId) {
     }
 }
 
-// --- Блок контроля: действия РОПа ---
 function ropAction(controlId, action) {
     const commentField = document.getElementById('comment_' + controlId);
 
     if (action === 'confirm') {
-        // Подтвердить — комментарий не обязателен
         sendRopAction(controlId, action, commentField.value.trim());
     } else {
-        // Отклонить, Перепрозвон, Подтвердить отказ — комментарий обязателен
         const comment = commentField.value.trim();
         if (!comment) {
             alert('Комментарий обязателен!');

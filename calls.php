@@ -23,7 +23,6 @@ $done_today = $stmt->fetchColumn();
 $remaining = max(0, $daily_plan - $done_today);
 
 // --- Загрузка задач из БД ---
-// v2.2: включаем все статусы кроме завершённых (Согласен, Отказ подтверждён)
 $stmt = $pdo->prepare("
     SELECT * FROM epk_tasks 
     WHERE user_tabel = ? 
@@ -77,19 +76,21 @@ $competitive = [
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
-        body { background:#f0f2f5; font-family:system-ui, -apple-system, sans-serif; padding:12px; }
-        .container { max-width:1300px; margin:0 auto; }
-        .nav { display:flex; align-items:center; padding:12px 20px; background:#fff; border-radius:12px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,0.1); }
+        body { background:#f0f2f5; font-family:system-ui, -apple-system, sans-serif; padding:12px; height:100vh; overflow:hidden; }
+        .container { max-width:1300px; margin:0 auto; height:100vh; display:flex; flex-direction:column; }
+        .nav { display:flex; align-items:center; padding:12px 20px; background:#fff; border-radius:12px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,0.1); flex-shrink:0; }
         .nav a { color:#1a73e8; text-decoration:none; font-weight:500; margin-right:20px; }
         .nav a:hover { text-decoration:underline; }
         .nav .right { margin-left:auto; font-size:0.85rem; color:#5f6368; }
-        .stats-bar { display:flex; gap:16px; padding:12px 20px; background:#fff; border-radius:12px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,0.1); }
+        .stats-bar { display:flex; gap:16px; padding:12px 20px; background:#fff; border-radius:12px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,0.1); flex-shrink:0; flex-wrap:wrap; }
         .stat { text-align:center; }
         .stat-value { font-size:1.5rem; font-weight:700; color:#1a73e8; }
         .stat-label { font-size:0.75rem; color:#5f6368; }
-        .main { display:grid; grid-template-columns:320px 1fr; gap:12px; }
+        .main { display:grid; grid-template-columns:320px 1fr; gap:12px; flex:1; min-height:0; }
         @media(max-width:900px){ .main { grid-template-columns:1fr; } }
-        .panel { background:#fff; border-radius:12px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,0.1); }
+        .panel { background:#fff; border-radius:12px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,0.1); overflow-y:auto; }
+        .panel-left { overflow-y:auto; max-height:100%; }
+        .panel-right { overflow-y:auto; max-height:100%; }
         .panel h3 { margin-bottom:12px; font-size:1rem; color:#202124; }
         .task-item { padding:10px 12px; border-radius:8px; margin-bottom:6px; cursor:pointer; transition:all 0.2s; border-left:3px solid transparent; position:relative; }
         .task-item:hover { background:#f8f9fa; }
@@ -108,13 +109,43 @@ $competitive = [
         .status-rop { background:#fce8e6; color:#c5221f; }
         .status-think { background:#fef3e8; color:#b06000; }
         .status-noanswer { background:#f3e8fd; color:#9334e6; }
-        .status-signed { background:#e6f4ea; color:#188038; }  /* Согласен — зелёный */
-        .status-recall { background:#e8f0fe; color:#1a73e8; }  /* Перезвон — синий */
-        .status-nocontact { background:#fce8e6; color:#c5221f; }  /* Нет контакта — красный */
-        .smart-form { display:grid; gap:10px; }
-        .smart-form label { font-size:0.8rem; font-weight:500; color:#5f6368; }
-        .smart-form input, .smart-form select, .smart-form textarea { padding:8px 12px; border:1px solid #dadce0; border-radius:8px; font-size:0.9rem; width:100%; }
-        .smart-form textarea { min-height:80px; resize:vertical; }
+        .status-signed { background:#e6f4ea; color:#188038; }
+        .status-recall { background:#e8f0fe; color:#1a73e8; }
+        .status-nocontact { background:#fce8e6; color:#c5221f; }
+        .smart-form { display:block; }
+        .smart-form label { font-size:0.8rem; font-weight:500; color:#5f6368; display:block; margin-bottom:4px; }
+        .smart-form input, .smart-form select, .smart-form textarea {
+            padding:8px 12px;
+            border:1px solid #dadce0;
+            border-radius:8px;
+            font-size:0.9rem;
+            box-sizing:border-box;
+            display:block;
+        }
+        /* Все текстовые поля и select "Результат звонка" – на всю ширину */
+        .smart-form input[type="text"],
+        .smart-form input[type="number"],
+        .smart-form textarea,
+        #freeComment,
+        #callStatus {
+            width:100% !important;
+        }
+        /* Поле "Возражения" (select) и поля даты/времени – компактные */
+        #objection,
+        #nextCallDate,
+        #nextCallTime {
+            width:auto !important;
+            display:inline-block;
+        }
+        /* Для select "Возражения" и "Результат звонка" общий стиль, но "Результат" остаётся широким */
+        #callStatus {
+            width:100% !important;
+        }
+        .smart-form textarea, #freeComment {
+            height:38px;
+            resize:vertical;
+            overflow-y:auto;
+        }
         .btn { padding:10px 16px; border:none; border-radius:8px; cursor:pointer; font-size:0.85rem; font-weight:500; transition:all 0.2s; }
         .btn-primary { background:#1a73e8; color:#fff; }
         .btn-primary:hover { background:#1557b0; }
@@ -168,8 +199,8 @@ $competitive = [
     </div>
 
     <div class="main">
-        <!-- Левая колонка: список задач -->
-        <div class="panel">
+        <!-- Левая колонка: список задач (прокручивается) -->
+        <div class="panel panel-left">
             <h3>Задачи</h3>
             <?php if (empty($tasks)): ?>
                 <div class="empty-state">Нет задач</div>
@@ -186,7 +217,6 @@ $competitive = [
                     elseif ($task['status'] === 'Думает') { $status_class = 'status-think'; $status_text = 'Думает'; }
                     elseif ($task['status'] === 'Недозвон') { $status_class = 'status-noanswer'; $status_text = 'Недозвон'; }
 
-                    // Время в статусе "думает"
                     $think_time_str = '';
                     if ($task['status'] === 'Думает' && $task['first_status_at']) {
                         $first = new DateTime($task['first_status_at']);
@@ -213,7 +243,7 @@ $competitive = [
         </div>
 
         <!-- Правая колонка: форма -->
-        <div class="panel" id="formPanel">
+        <div class="panel panel-right" id="formPanel">
             <h3 id="formTitle">Выберите задачу</h3>
             <div id="ritmLink" style="display:none; margin-bottom:12px;">
                 <a href="#" target="_blank" style="color:#1a73e8; font-size:0.85rem; text-decoration:none;">
@@ -235,10 +265,10 @@ $competitive = [
                     </select>
                 </div>
 
-                <div id="smartFields">
+                <div id="smartFields" class="smart-form">
                     <div class="form-section">
                         <div class="form-section-title">1. Что беспокоит клиента?</div>
-                        <input type="text" id="painPoint" placeholder="Проблема клиента">
+                        <textarea id="painPoint" placeholder="Проблема клиента" rows="1"></textarea>
                     </div>
                     <div class="form-section">
                         <div class="form-section-title">2. Возражения</div>
@@ -250,15 +280,15 @@ $competitive = [
                             <option value="нет_решения">Нет решения</option>
                             <option value="другое">Другое</option>
                         </select>
-                        <textarea id="objectionText" placeholder="Детали возражения" style="margin-top:6px;"></textarea>
+                        <textarea id="objectionText" placeholder="Детали возражения" style="margin-top:6px;" rows="1"></textarea>
                     </div>
                     <div class="form-section">
                         <div class="form-section-title">3. Что договорились?</div>
-                        <textarea id="nextStep" placeholder="Конкретные договорённости"></textarea>
+                        <textarea id="nextStep" placeholder="Конкретные договорённости" rows="1"></textarea>
                     </div>
                     <div class="form-section">
                         <div class="form-section-title">4. Кто принимает решение?</div>
-                        <input type="text" id="decisionMaker" placeholder="Роль (не ФИО)">
+                        <textarea id="decisionMaker" placeholder="Роль (не ФИО)" rows="1"></textarea>
                     </div>
                     <div class="form-section">
                         <div class="form-section-title">5. Следующий контакт</div>
@@ -269,7 +299,7 @@ $competitive = [
 
                 <div class="form-section">
                     <div class="form-section-title">Комментарий</div>
-                    <textarea id="freeComment" placeholder="Свободный комментарий..."></textarea>
+                    <textarea id="freeComment" placeholder="Свободный комментарий..." rows="1"></textarea>
                 </div>
 
                 <div class="comment-preview" id="assembledComment" style="display:none;">
@@ -312,7 +342,6 @@ function selectTask(taskId) {
     document.getElementById('formTitle').textContent = 'Задача: ' + taskId.substring(0, 12) + '...';
     document.getElementById('formContent').style.display = 'block';
 
-    // Обновляем ссылку на Ритм
     const ritmLink = document.getElementById('ritmLink');
     const ritmUrl = 'https://new-tortuga.sigma.sbrf.ru/tort/tasks/sales/' + taskId;
     ritmLink.querySelector('a').href = ritmUrl;
@@ -340,7 +369,6 @@ function onStatusChange() {
     const status = document.getElementById('callStatus').value;
     const smartFields = document.getElementById('smartFields');
 
-    // Только активные статусы требуют smart-форму
     const requiredFormStatuses = ['think', 'reject', 'recall'];
     if (requiredFormStatuses.includes(status)) {
         smartFields.style.display = 'block';
@@ -351,12 +379,11 @@ function onStatusChange() {
     updateAssembledComment();
 }
 
-// ========== СОБРАТЬ КОММЕНТАРИЙ ==========
+// ========== ПОЛНЫЙ КОММЕНТАРИЙ (для сохранения в БД) ==========
 function assembleComment() {
     const status = document.getElementById('callStatus').value;
     const freeComment = document.getElementById('freeComment').value.trim();
 
-    // Технические/финальные статусы — комментарий необязателен
     if (status === 'noanswer') {
         return freeComment || 'Недозвон';
     }
@@ -386,6 +413,40 @@ function assembleComment() {
     return parts.join('. ');
 }
 
+// ========== СОКРАЩЁННЫЙ КОММЕНТАРИЙ (для копирования) ==========
+function assembleShortComment() {
+    const status = document.getElementById('callStatus').value;
+    const freeComment = document.getElementById('freeComment').value.trim();
+
+    if (status === 'noanswer') {
+        return freeComment || 'Недозвон';
+    }
+    if (status === 'signed' || status === 'contract') {
+        return freeComment || 'Согласен';
+    }
+    if (status === 'nocontact') {
+        return freeComment || 'Нет контакта';
+    }
+
+    const pain = document.getElementById('painPoint').value.trim();
+    const objection = document.getElementById('objection').value;
+    const objectionText = document.getElementById('objectionText').value.trim();
+    const nextStep = document.getElementById('nextStep').value.trim();
+    const decision = document.getElementById('decisionMaker').value.trim();
+    const nextDate = document.getElementById('nextCallDate').value;
+    const nextTime = document.getElementById('nextCallTime').value;
+
+    let parts = [];
+    if (pain) parts.push('Пробл: ' + pain);
+    if (objection) parts.push('Возр: ' + objection + (objectionText ? ' — ' + objectionText : ''));
+    if (nextStep) parts.push('Дог: ' + nextStep);
+    if (decision) parts.push('Реш: ' + decision);
+    if (nextDate) parts.push('След.: ' + nextDate + (nextTime ? ' ' + nextTime : ''));
+    if (freeComment) parts.push('Комм: ' + freeComment);
+
+    return parts.join('. ');
+}
+
 function updateAssembledComment() {
     const comment = assembleComment();
     if (comment) {
@@ -396,14 +457,13 @@ function updateAssembledComment() {
     }
 }
 
-// ========== СОБРАТЬ ПОЛНЫЙ ТЕКСТ (текущий + история) ==========
-function assembleFullText() {
-    const comment = assembleComment();
+// ========== СОБРАТЬ ПОЛНЫЙ ТЕКСТ (для копирования с историей, используем сокращённый вариант) ==========
+function assembleFullText(short = true) {
+    const comment = short ? assembleShortComment() : assembleComment();
     if (!comment.trim()) return '';
 
     let fullText = comment;
 
-    // Добавляем историю, если есть
     if (commentHistory && commentHistory.length > 0) {
         fullText += '\n\n--- История звонков ---';
         commentHistory.forEach((h) => {
@@ -413,16 +473,18 @@ function assembleFullText() {
                 noanswer: 'Недозвон', contract: 'Договор'
             };
             const statusText = statusMap[h.call_result] || h.call_result;
-            fullText += '\n\n[' + h.created_at + '] ' + statusText + ':\n' + (h.comment_text || '(без комментария)');
+            // Для истории используем полные заголовки, т.к. они уже сохранены
+            const historyComment = h.comment_text || '(без комментария)';
+            fullText += '\n\n[' + h.created_at + '] ' + statusText + ':\n' + historyComment;
         });
     }
 
     return fullText;
 }
 
-// ========== КОПИРОВАТЬ КОММЕНТАРИЙ ==========
+// ========== КОПИРОВАТЬ (сокращённый) ==========
 function copyComment() {
-    const fullText = assembleFullText();
+    const fullText = assembleFullText(true);
     if (!fullText) { showToast('Заполните форму'); return; }
 
     navigator.clipboard.writeText(fullText).then(() => {
@@ -430,12 +492,11 @@ function copyComment() {
     });
 }
 
-// ========== СОХРАНИТЬ ЗВОНОК ==========
+// ========== СОХРАНИТЬ ЗВОНОК (полный комментарий) ==========
 function saveCall() {
-    const comment = assembleComment();
+    const comment = assembleComment(); // полный для БД
     const callResult = document.getElementById('callStatus').value;
 
-    // Только активные статусы требуют заполнения формы
     const requiredFormStatuses = ['think', 'reject', 'recall'];
     if (requiredFormStatuses.includes(callResult) && !comment.trim()) {
         showToast('Заполните форму');
@@ -446,7 +507,6 @@ function saveCall() {
     const nextTime = document.getElementById('nextCallTime').value;
     const nextCallDateTime = nextDate ? (nextTime ? nextDate + ' ' + nextTime : nextDate) : '';
 
-    // ДИАГНОСТИКА: проверяем данные перед отправкой
     console.log('=== saveCall() ===');
     console.log('currentTask:', currentTask);
     console.log('callResult:', callResult);
@@ -486,20 +546,18 @@ function saveCall() {
             return;
         }
         if (d.success) {
-            // Копируем в буфер (текущий + история)
-            const fullText = assembleFullText();
-            if (fullText) {
-                navigator.clipboard.writeText(fullText).then(() => {
+            // При сохранении тоже копируем сокращённый вариант (для удобства)
+            const fullTextShort = assembleFullText(true);
+            if (fullTextShort) {
+                navigator.clipboard.writeText(fullTextShort).then(() => {
                     showToast('Сохранено и скопировано. Фрод-скор: ' + d.fraud_score);
                 });
             } else {
                 showToast('Сохранено. Фрод-скор: ' + d.fraud_score);
             }
 
-            // Обновляем список задач без перезагрузки
             updateTaskInList(currentTask, d.new_status, d.call_count);
 
-            // Если задача завершена — убираем из списка
             if (d.new_status === 'Согласен' || d.new_status === 'Отказ подтверждён') {
                 removeTaskFromList(currentTask);
                 document.getElementById('formContent').style.display = 'none';
@@ -518,12 +576,11 @@ function saveCall() {
     });
 }
 
-// ========== ОБНОВИТЬ ЗАДАЧУ В СПИСКЕ (без перезагрузки) ==========
+// ========== ОБНОВИТЬ ЗАДАЧУ ==========
 function updateTaskInList(taskId, newStatus, callCount) {
     const taskEl = document.querySelector('[data-task="' + taskId + '"]');
     if (!taskEl) return;
 
-    // Обновляем счётчик звонков
     let callsBadge = taskEl.querySelector('.task-calls');
     if (!callsBadge && callCount > 0) {
         callsBadge = document.createElement('span');
@@ -532,7 +589,6 @@ function updateTaskInList(taskId, newStatus, callCount) {
     }
     if (callsBadge) callsBadge.textContent = '(' + callCount + ' зв.)';
 
-    // Обновляем статус
     const statusBadge = taskEl.querySelector('.status-badge');
     const statusMap = {
         'Назначена': {text: 'Новая', cls: 'status-new'},
@@ -551,7 +607,7 @@ function removeTaskFromList(taskId) {
     if (taskEl) taskEl.remove();
 }
 
-// ========== УДАЛИТЬ ЗАДАЧУ ==========
+// ========== УДАЛИТЬ ==========
 function deleteTask(taskId) {
     if (!confirm('Удалить задачу?')) return;
 
@@ -608,12 +664,12 @@ function loadHistory(taskId) {
     });
 }
 
-// ========== КОПИРОВАТЬ И ПЕРЕЙТИ ==========
+// ========== КОПИРОВАТЬ И ПЕРЕЙТИ (сокращённый) ==========
 function copyAndGo() {
-    const fullText = assembleFullText();
-    if (!fullText) { showToast('Заполните форму'); return; }
+    const fullTextShort = assembleFullText(true);
+    if (!fullTextShort) { showToast('Заполните форму'); return; }
 
-    navigator.clipboard.writeText(fullText).then(() => {
+    navigator.clipboard.writeText(fullTextShort).then(() => {
         showToast('Скопировано (с историей)');
         setTimeout(() => window.open('https://new-tortuga.sigma.sbrf.ru/tort/tasks/sales/' + currentTask, '_blank'), 500);
     });
@@ -654,7 +710,7 @@ function showToast(msg) {
     setTimeout(() => t.classList.remove('show'), 3000);
 }
 
-// ========== ОБНОВЛЕНИЕ СБОРНОГО КОММЕНТАРИЯ ==========
+// ========== ОБНОВЛЕНИЕ КОММЕНТАРИЯ ==========
 document.querySelectorAll('.smart-form input, .smart-form select, .smart-form textarea').forEach(el => {
     el.addEventListener('input', updateAssembledComment);
 });

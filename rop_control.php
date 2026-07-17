@@ -308,7 +308,7 @@ if ($is_head) {
     }
 }
 
-// --- CSV ВЫГРУЗКА ЗАДАЧ ---
+// --- CSV ВЫГРУЗКА ЗАДАЧ НА КОНТРОЛЕ (rop_control_queue) ---
 if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 'terman')) {
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename=tasks_' . date('Y-m-d') . '.csv');
@@ -381,6 +381,78 @@ if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 
             $task['rop_comment'] ?? '',
             $task['created_at'],
             $task['checked_at'] ?? ''
+        ], ',', '"', '\\');
+    }
+    fclose($output);
+    exit;
+}
+
+// --- CSV ВЫГРУЗКА ВСЕХ ЗАДАЧ (epk_tasks) ---
+if (isset($_GET['export_all_tasks']) && ($is_head || $role === 'admin' || $role === 'terman')) {
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename=all_tasks_' . date('Y-m-d') . '.csv');
+    $output = fopen('php://output', 'w');
+    fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
+
+    fputcsv($output, ['ID задачи', 'Менеджер', 'Табельный номер', 'Территория', 'Статус', 'Верхнеуровневый статус', 'Кол-во звонков', 'Дата импорта', 'Дата обновления', 'Следующий контакт'], ',', '"', '\\');
+
+    $sql = "
+        SELECT 
+            et.task_id,
+            u.full_name as manager_name,
+            u.tabel_number,
+            t.name as territory_name,
+            et.status,
+            et.top_status,
+            et.call_count,
+            et.imported_at,
+            et.updated_at,
+            et.next_call_date
+        FROM epk_tasks et
+        LEFT JOIN users u ON et.user_tabel = u.tabel_number
+        LEFT JOIN users mgr ON u.manager_id = mgr.id
+        LEFT JOIN territories t ON mgr.territory_id = t.id
+        WHERE 1=1
+    ";
+    $params = [];
+
+    // --- УБРАНЫ ФИЛЬТРЫ ПО ДАТЕ И СТАТУСУ (выгружаем всё) ---
+
+    // Ограничение по команде для head
+    if ($is_head) {
+        $team_ids = array_column($employees, 'id');
+        if (!empty($team_ids)) {
+            $placeholders = implode(',', array_fill(0, count($team_ids), '?'));
+            $sql .= " AND u.id IN ($placeholders)";
+            $params = array_merge($params, $team_ids);
+        } else {
+            fclose($output);
+            exit;
+        }
+    }
+
+    // Фильтр по сотруднику (для admin)
+    if ($role === 'admin' && !empty($filter_employee_tabel)) {
+        $sql .= " AND u.tabel_number = :employee_tabel";
+        $params[':employee_tabel'] = $filter_employee_tabel;
+    }
+
+    $sql .= " ORDER BY et.imported_at DESC";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        fputcsv($output, [
+            $row['task_id'],
+            $row['manager_name'] ?? '',
+            $row['tabel_number'] ?? '',
+            $row['territory_name'] ?? '',
+            $row['status'],
+            $row['top_status'],
+            $row['call_count'],
+            $row['imported_at'],
+            $row['updated_at'],
+            $row['next_call_date'] ?? ''
         ], ',', '"', '\\');
     }
     fclose($output);
@@ -539,7 +611,8 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
         <?php if ($is_head || $role === 'admin' || $role === 'terman'): ?>
         <div class="csv-links">
             <a href="?export_stats=1&date_from=<?= $filter_date_from ?>&date_to=<?= $filter_date_to ?>&filter_employee_tabel=<?= urlencode($filter_employee_tabel) ?>">Статистика CSV</a>
-            <a href="?export_tasks=1&status=<?= urlencode($filter_status) ?>&date_from=<?= $filter_date_from ?>&date_to=<?= $filter_date_to ?>&filter_employee_tabel=<?= urlencode($filter_employee_tabel) ?>">Задачи CSV</a>
+            <a href="?export_tasks=1&status=<?= urlencode($filter_status) ?>&date_from=<?= $filter_date_from ?>&date_to=<?= $filter_date_to ?>&filter_employee_tabel=<?= urlencode($filter_employee_tabel) ?>">Задачи на контроле CSV</a>
+            <a href="?export_all_tasks=1&filter_employee_tabel=<?= urlencode($filter_employee_tabel) ?>">Все задачи CSV</a>
         </div>
         <?php endif; ?>
     </div>

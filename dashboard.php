@@ -9,6 +9,10 @@ $user_name = $_SESSION['name'];
 $user_role = $_SESSION['role'];
 $tabel_number = $_SESSION['tabel'];
 
+// --- Фильтры ---
+$filter_key = $_GET['filter_key'] ?? 'all';      // all, key, nonkey
+$filter_station = $_GET['filter_station'] ?? 'all'; // all, pirate, target, newreg
+
 // --- Количество свободных лидов и моих лидов (только для менеджеров) ---
 $free_leads_count = 0;
 $my_leads_count = 0;
@@ -22,7 +26,7 @@ if (in_array($user_role, ['manager', 'head', 'admin', 'mmb_tp_head'])) {
     $my_leads_count = (int)$stmt->fetchColumn();
 }
 
-// --- Функция подсчёта рабочих дней (пн-пт) между двумя датами (включительно) ---
+// --- Функция подсчёта рабочих дней ---
 function getWorkingDaysCount($start_date, $end_date) {
     $start = new DateTime($start_date);
     $end   = new DateTime($end_date);
@@ -95,7 +99,7 @@ if (!$rec || date('Y-m-d', strtotime($rec['updated_at'])) !== $today) {
 $selected_date = $_GET['date'] ?? date('Y-m-d');
 $selected_month = date('Y-m', strtotime($selected_date));
 
-// --- Генерация мотивационных уведомлений (только для текущего дня) ---
+// --- Генерация мотивационных уведомлений ---
 if ($selected_date == date('Y-m-d')) {
     $today_str = date('Y-m-d');
     $check = $pdo->prepare("SELECT COUNT(*) FROM notifications WHERE user_tabel = ? AND date(created_at) = ?");
@@ -185,7 +189,7 @@ function generateMotivationalNotifications($pdo, $tabel) {
     }
 }
 
-// -------- ОСНОВНЫЕ ДАННЫЕ (с учётом выбранной даты и РАБОЧИХ дней) --------
+// -------- ОСНОВНЫЕ ДАННЫЕ --------
 $stmt = $pdo->prepare("SELECT * FROM plans WHERE tabel_number = ? AND period = ?");
 $stmt->execute([$tabel_number, $selected_month]);
 $plans = $stmt->fetch();
@@ -203,18 +207,115 @@ $days_passed = getWorkingDaysCount($month_start, $selected_date);
 $work_days_total = getWorkingDaysCount($month_start, date('Y-m-t', strtotime($selected_date)));
 $days_left = max(0, $work_days_total - $days_passed);
 
+// --- Функция получения данных из inn_records с фильтрами ---
+function getProductSumsFromInn($pdo, $user_tabel, $date_from, $date_to, $filter_key, $filter_station) {
+    $table = 'inn_records';
+    $cols = $pdo->query("PRAGMA table_info($table)")->fetchAll(PDO::FETCH_COLUMN, 1);
+    $hasKey = in_array('is_key', $cols);
+    $hasStation = in_array('station_type', $cols);
+
+    $sql = "SELECT 
+                SUM(CASE WHEN product = 'ТЭ' THEN 1 ELSE 0 END) as registrations,
+                SUM(CASE WHEN product = 'Смарт' THEN 1 ELSE 0 END) as smart_cash,
+                SUM(CASE WHEN product = 'ПОС' THEN 1 ELSE 0 END) as pos_systems,
+                SUM(CASE WHEN product = 'Чаевые' THEN 1 ELSE 0 END) as inn_leads
+            FROM $table
+            WHERE DATE(sale_date) BETWEEN :date_from AND :date_to
+            AND employee_tabel = :user_tabel";
+    $params = [
+        ':date_from' => $date_from,
+        ':date_to' => $date_to,
+        ':user_tabel' => $user_tabel
+    ];
+
+    if ($hasKey && $filter_key == 'key') {
+        $sql .= " AND is_key = 1";
+    } elseif ($hasKey && $filter_key == 'nonkey') {
+        $sql .= " AND is_key = 0";
+    }
+    if ($hasStation && $filter_station == 'pirate') {
+        $sql .= " AND station_type = 'pirate'";
+    } elseif ($hasStation && $filter_station == 'target') {
+        $sql .= " AND station_type = 'target'";
+    } elseif ($hasStation && $filter_station == 'newreg') {
+        $sql .= " AND station_type = 'newreg'";
+    }
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) $row = ['registrations' => 0, 'smart_cash' => 0, 'pos_systems' => 0, 'inn_leads' => 0];
+    return $row;
+}
+
+// Определяем список менеджеров для агрегации
+$inn_managers = [];
+if (in_array($user_role, ['manager', 'ubr_middle', 'mmb_manager'])) {
+    $inn_managers[] = $tabel_number;
+} elseif (in_array($user_role, ['head', 'mmb_tp_head'])) {
+    $stmt = $pdo->prepare("SELECT tabel_number FROM users WHERE manager_id = ? AND role IN ('manager', 'ubr_middle', 'mmb_manager') AND is_active = 1");
+    $stmt->execute([$user_id]);
+    $inn_managers = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    if (empty($inn_managers)) $inn_managers = [];
+} elseif ($user_role == 'admin' || $user_role == 'territory_head' || $user_role == 'terman') {
+    $stmt = $pdo->query("SELECT tabel_number FROM users WHERE role IN ('manager', 'ubr_middle', 'mmb_manager') AND is_active = 1");
+    $inn_managers = $stmt->fetchAll(PDO::FETCH_COLUMN);
+} else {
+    $inn_managers = [];
+}
+
+// Собираем отфильтрованные данные из inn_records
+$total_products = ['registrations' => 0, 'smart_cash' => 0, 'pos_systems' => 0, 'inn_leads' => 0];
+$today_products = ['registrations' => 0, 'smart_cash' => 0, 'pos_systems' => 0, 'inn_leads' => 0];
+
+foreach ($inn_managers as $m_tabel) {
+    $month_end = date('Y-m-t', strtotime($selected_date));
+    $month_prod = getProductSumsFromInn($pdo, $m_tabel, $month_start, $month_end, $filter_key, $filter_station);
+    foreach (['registrations', 'smart_cash', 'pos_systems', 'inn_leads'] as $key) {
+        $total_products[$key] += $month_prod[$key];
+    }
+    $today_prod = getProductSumsFromInn($pdo, $m_tabel, $selected_date, $selected_date, $filter_key, $filter_station);
+    foreach (['registrations', 'smart_cash', 'pos_systems', 'inn_leads'] as $key) {
+        $today_products[$key] += $today_prod[$key];
+    }
+}
+
+// ---- ПОЛУЧАЕМ ДАННЫЕ ИЗ DAILY_REPORTS (без изменений) ----
 $stmt = $pdo->prepare("SELECT 
     SUM(calls) as calls_fact, SUM(calls_answered) as calls_answered_fact,
     SUM(meetings) as meetings_fact, SUM(contracts) as contracts_fact,
-    SUM(registrations) as registrations_fact, SUM(smart_cash) as smart_cash_fact,
-    SUM(pos_systems) as pos_systems_fact, SUM(inn_leads) as inn_leads_fact,
-    SUM(teams) as teams_fact, SUM(turnover) as turnover_fact,
+    SUM(turnover) as turnover_fact,
     SUM(rko) as rko_fact, SUM(ai_calls) as ai_calls_fact
     FROM daily_reports WHERE user_id = ? AND strftime('%Y-%m', report_date) = ?");
 $stmt->execute([$user_id, $selected_month]);
 $facts = $stmt->fetch(PDO::FETCH_ASSOC);
-if (!$facts) $facts = array_fill_keys(['calls_fact','calls_answered_fact','meetings_fact','contracts_fact','registrations_fact','smart_cash_fact','pos_systems_fact','inn_leads_fact','teams_fact','turnover_fact','rko_fact','ai_calls_fact'], 0);
+if (!$facts) $facts = array_fill_keys(['calls_fact','calls_answered_fact','meetings_fact','contracts_fact','turnover_fact','rko_fact','ai_calls_fact'], 0);
 
+// Подменяем факты по продуктам на данные из inn_records
+$facts['registrations_fact'] = $total_products['registrations'];
+$facts['smart_cash_fact'] = $total_products['smart_cash'];
+$facts['pos_systems_fact'] = $total_products['pos_systems'];
+$facts['inn_leads_fact'] = $total_products['inn_leads'];
+
+// ---- ТЕКУЩИЙ ДЕНЬ (из daily_reports) ----
+$stmt = $pdo->prepare("SELECT 
+    calls, calls_answered, meetings, contracts, turnover, rko, ai_calls
+    FROM daily_reports WHERE user_id = ? AND report_date = ?");
+$stmt->execute([$user_id, $selected_date]);
+$today_data = $stmt->fetch(PDO::FETCH_ASSOC);
+if (!$today_data) {
+    $today_data = [
+        'calls'=>0, 'calls_answered'=>0, 'meetings'=>0, 'contracts'=>0,
+        'turnover'=>0, 'rko'=>0, 'ai_calls'=>0
+    ];
+}
+// Подменяем сегодняшние продукты
+$today_data['registrations'] = $today_products['registrations'];
+$today_data['smart_cash'] = $today_products['smart_cash'];
+$today_data['pos_systems'] = $today_products['pos_systems'];
+$today_data['inn_leads'] = $today_products['inn_leads'];
+
+// ---- РАСЧЁТ МЕТРИК (без изменений) ----
 function calc($p, $f, $dp, $dl, $wd) {
     if ($p<=0) return ['f'=>$p,'d'=>0,'s'=>'none'];
     $ideal = ceil($p / max(1, $wd));
@@ -227,20 +328,6 @@ function calc($p, $f, $dp, $dl, $wd) {
     elseif ($forecast >= $p) $status = 'warning';
     else $status = 'danger';
     return ['f'=>$forecast, 'd'=>$daily, 's'=>$status];
-}
-
-$today_data = [];
-$stmt = $pdo->prepare("SELECT 
-    calls, calls_answered, meetings, contracts, registrations, smart_cash, pos_systems, inn_leads, teams, turnover, rko, ai_calls
-    FROM daily_reports WHERE user_id = ? AND report_date = ?");
-$stmt->execute([$user_id, $selected_date]);
-$today_data = $stmt->fetch(PDO::FETCH_ASSOC);
-if (!$today_data) {
-    $today_data = [
-        'calls'=>0, 'calls_answered'=>0, 'meetings'=>0, 'contracts'=>0,
-        'registrations'=>0, 'smart_cash'=>0, 'pos_systems'=>0, 'inn_leads'=>0,
-        'teams'=>0, 'turnover'=>0, 'rko'=>0, 'ai_calls'=>0
-    ];
 }
 
 $metrics = [
@@ -263,6 +350,7 @@ foreach ($metrics as $k=>$m) {
     $metrics[$k]['percent'] = $m['plan']>0 ? round(($m['fact']/$m['plan'])*100) : 0;
 }
 
+// ---- ИСТОРИЯ (без изменений) ----
 $history = $pdo->prepare("SELECT report_date, calls, calls_answered, meetings, contracts, registrations, smart_cash, pos_systems, inn_leads, teams, turnover, rko, ai_calls FROM daily_reports WHERE user_id = ? ORDER BY report_date DESC LIMIT 30");
 $history->execute([$user_id]);
 $history_rows = $history->fetchAll();
@@ -275,12 +363,12 @@ if ($selected_date == date('Y-m-d')) {
     $motivNotifications = $notif_stmt->fetchAll();
 }
 
-// ---------- ДАШБОРД КОМАНДЫ (ТЭ+Смарт+ПОС) – с учётом рабочих дней ----------
+// ---------- ДАШБОРД КОМАНДЫ (ТЭ+Смарт+ПОС) с inn_records ----------
 $team_from = $_GET['team_from'] ?? date('Y-m-01');
 $team_to   = $_GET['team_to']   ?? date('Y-m-d');
 $tomorrow   = date('Y-m-d', strtotime('+1 day'));
 
-// Формирование списка сотрудников для дашборда команды
+// Формирование списка сотрудников (без изменений)
 if ($user_role == 'head') {
     $stmt = $pdo->prepare("SELECT id, full_name, tabel_number FROM users WHERE is_active = 1 AND role IN ('manager', 'mmb_manager', 'ubr_middle') AND manager_id = ? ORDER BY full_name");
     $stmt->execute([$user_id]);
@@ -306,7 +394,7 @@ if ($user_role == 'head') {
     $team_members = $pdo->query("SELECT id, full_name, tabel_number FROM users WHERE (role = 'manager' OR role = 'mmb_manager' OR role = 'ubr_middle') AND is_active = 1 ORDER BY full_name")->fetchAll();
 }
 
-// Все календарные дни месяца (для шапки таблицы)
+// Календарь
 $team_month = date('m', strtotime($team_to));
 $team_year = date('Y', strtotime($team_to));
 $days_in_month = (int)date('t', strtotime("$team_year-$team_month-01"));
@@ -315,16 +403,13 @@ for ($d = 1; $d <= $days_in_month; $d++) {
     $calendar_days[] = sprintf('%04d-%02d-%02d', $team_year, $team_month, $d);
 }
 
-// Функция проверки рабочего дня
 function isWorkingDay($date) { return date('N', strtotime($date)) < 6; }
 
-// Расчёт рабочих дней через уже существующую функцию getWorkingDaysCount
 $month_start = date('Y-m-01', strtotime($team_to));
 $total_work_days = getWorkingDaysCount($month_start, date('Y-m-t', strtotime($team_to)));
 $passed_work_days = getWorkingDaysCount($month_start, $team_to);
 $remaining_work_days = getWorkingDaysCount(date('Y-m-d', strtotime($team_to . ' +1 day')), date('Y-m-t', strtotime($team_to)));
 
-// Предыдущие месяцы (если период захватывает)
 $prev_months = [];
 $period_start = new DateTime($team_from);
 $team_month_start = new DateTime(date('Y-m-01', strtotime($team_to)));
@@ -349,9 +434,8 @@ foreach ($team_members as $m) {
     $member_total_work = 0;
 
     foreach ($calendar_days as $date_str) {
-        $stmt = $pdo->prepare("SELECT COALESCE(SUM(registrations),0) + COALESCE(SUM(smart_cash),0) + COALESCE(SUM(pos_systems),0) FROM daily_reports WHERE user_id = ? AND report_date = ?");
-        $stmt->execute([$m['id'], $date_str]);
-        $val = (int)$stmt->fetchColumn();
+        $day_prod = getProductSumsFromInn($pdo, $m['tabel_number'], $date_str, $date_str, $filter_key, $filter_station);
+        $val = $day_prod['registrations'] + $day_prod['smart_cash'] + $day_prod['pos_systems'];
         $daily_vals[$date_str] = $val;
         if ($date_str >= $team_from && $date_str <= $team_to) {
             $member_total_period += $val;
@@ -364,13 +448,20 @@ foreach ($team_members as $m) {
 
     $prev_data = [];
     foreach ($prev_months as $ym) {
-        $stmt = $pdo->prepare("SELECT COALESCE(SUM(registrations),0) + COALESCE(SUM(smart_cash),0) + COALESCE(SUM(pos_systems),0) FROM daily_reports WHERE user_id = ? AND strftime('%Y-%m', report_date) = ? AND report_date BETWEEN ? AND ?");
-        $stmt->execute([$m['id'], $ym, $team_from, $team_to]);
-        $val = (int)$stmt->fetchColumn();
+        $first_day = date('Y-m-01', strtotime($ym));
+        $last_day = date('Y-m-t', strtotime($ym));
+        $from = max($first_day, $team_from);
+        $to = min($last_day, $team_to);
+        if ($from <= $to) {
+            $prev_prod = getProductSumsFromInn($pdo, $m['tabel_number'], $from, $to, $filter_key, $filter_station);
+            $val = $prev_prod['registrations'] + $prev_prod['smart_cash'] + $prev_prod['pos_systems'];
+        } else {
+            $val = 0;
+        }
         $prev_data[$ym] = $val;
         $member_total_period += $val;
         if (!isset($prev_month_totals[$ym])) {
-            $prev_month_totals[$ym] = ['total' => 0, 'members' => []];
+            $prev_month_totals[$ym] = ['total' => 0];
         }
         $prev_month_totals[$ym]['total'] += $val;
     }
@@ -412,26 +503,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
 
 <!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>📊 Дашборд</title><meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=yes"><style>
-*{margin:0;padding:0;box-sizing:border-box}body{background:#f0f2f5;font-family:system-ui;padding:12px}.container{max-width:1400px;margin:0 auto}.navbar{background:linear-gradient(135deg,#1a1a2e,#16213e);color:#fff;padding:12px 16px;border-radius:16px;margin-bottom:20px;display:flex;justify-content:space-between;flex-wrap:wrap;align-items:center}.logo{font-size:1.3rem;font-weight:bold}.nav-links{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.nav-links a{color:#ccc;text-decoration:none;font-size:0.85rem}.nav-links .user-info{color:#fff;font-weight:bold;margin-left:auto;font-size:0.9rem}.date-form{display:flex;gap:8px;align-items:center;margin-left:12px}.date-form input[type="date"]{padding:5px 8px;border-radius:8px;border:none;font-size:0.85rem}.date-form button{background:#fff;color:#1a1a2e;border:none;padding:5px 12px;border-radius:8px;font-weight:bold;cursor:pointer;font-size:0.85rem}.rank-card{background:linear-gradient(135deg,#f5af19,#f12711);color:#fff;padding:10px 16px;border-radius:16px;margin-bottom:20px;display:flex;justify-content:space-between;font-weight:bold}.ai-card{background:#e6f7ff;border-left:5px solid #1890ff;padding:12px 16px;border-radius:12px;margin-bottom:20px;display:flex;align-items:center;gap:12px}.notif-card{background:#fff3e0;border-left:5px solid #ff9800;padding:12px 16px;border-radius:12px;margin-bottom:20px;display:flex;flex-direction:column;gap:8px}.notif-item{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:0.9rem}.notif-text{flex:1}.notif-close{background:none;border:none;color:#888;cursor:pointer;font-size:1.2rem;line-height:1}.read-all-btn{background:#ff9800;color:#fff;border:none;padding:6px 14px;border-radius:16px;cursor:pointer;font-size:0.8rem;font-weight:bold;align-self:flex-end}.quest-card{background:#f0f9ff;border-left:5px solid #7c3aed;padding:12px 16px;border-radius:12px;margin-bottom:20px;display:flex;align-items:center;gap:12px;text-decoration:none;color:inherit;cursor:pointer}.leads-card{background:#f0f4ff;border-left:5px solid #1a73e8;padding:12px 16px;border-radius:12px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center}.leads-card a{background:#1a73e8;color:#fff;padding:8px 16px;border-radius:20px;text-decoration:none;font-weight:bold}.metrics-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;margin-bottom:30px}.metric-card{background:#fff;border-radius:16px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,0.05)}.metric-header{display:flex;justify-content:space-between;margin-bottom:8px;font-size:0.8rem;color:#555}.metric-title{font-weight:600}.metric-value-row{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}.metric-value{font-size:1.9rem;font-weight:800;line-height:1.2}.metric-value.success{color:#2e7d32}.metric-value.warning{color:#ed6c02}.metric-value.danger{color:#d32f2f}.metric-daily-target{font-size:1.9rem;font-weight:800;color:#1a1a2e}.metric-sub{font-size:0.7rem;color:#666;margin-top:6px}.metric-plan-fact{font-size:0.7rem;color:#555;margin-top:4px;display:flex;justify-content:space-between}.progress-bar{background:#e0e0e0;border-radius:10px;height:6px;margin-top:8px;overflow:hidden}.progress-fill{height:100%;border-radius:10px}.progress-fill.success{background:#2e7d32}.progress-fill.warning{background:#ed6c02}.progress-fill.danger{background:#d32f2f}.report-form{background:#fff;border-radius:16px;padding:20px;margin-bottom:30px}.form-row{display:flex;flex-wrap:wrap;gap:16px;margin-bottom:20px}.form-group{flex:1;min-width:140px}.form-group label{font-size:0.7rem;font-weight:600;color:#444;display:block;margin-bottom:4px}.form-group input{width:100%;padding:10px 12px;border:1px solid #ccc;border-radius:12px;font-size:1rem}.inn-group{display:flex;gap:8px;margin-top:6px;align-items:center}.inn-group input{flex:2;padding:10px 8px}.inn-group select{flex:1;padding:10px 4px}.add-btn{background:#28a745;color:#fff;border:none;padding:10px 16px;border-radius:12px;cursor:pointer;font-size:0.85rem;white-space:nowrap;font-weight:bold}.readonly-input{background:#f5f5f5;cursor:default}.save-btn{background:#1890ff;color:#fff;border:none;padding:12px 20px;border-radius:30px;cursor:pointer;font-size:1rem;width:100%}.history-table{overflow-x:auto}table{width:100%;background:#fff;border-radius:16px;border-collapse:collapse}th,td{padding:10px 6px;text-align:center;border-bottom:1px solid #eee;font-size:0.75rem}th{background:#f8f9fa}.edit-link{color:#1a73e8;cursor:pointer;font-size:0.85rem;text-decoration:underline}.team-dashboard { margin-bottom:30px; overflow-x:auto; background:#fff; border-radius:16px; padding:16px; }
-.team-dashboard h3 { margin-bottom:15px; }
-.team-dashboard table { font-size:0.7rem; width:100%; border-collapse:collapse; }
-.team-dashboard th,.team-dashboard td { padding:6px 4px; border:1px solid #eee; text-align:center; }
-.team-dashboard th { background:#f8f9fa; }
-.weekend { background-color:#f5f5f5; }
-.team-period-form { display:flex; gap:10px; margin-bottom:12px; align-items:center; flex-wrap:wrap; }
-.team-period-form input[type="date"] { padding:5px 8px; border-radius:8px; border:1px solid #ccc; font-size:0.85rem; }
-.team-period-form button { background:#1a73e8; color:#fff; border:none; padding:6px 12px; border-radius:8px; cursor:pointer; font-size:0.85rem; }
-.expected-input { width:55px; padding:2px; font-size:0.7rem; }
-.disclaimer-box { background:#f8f9fa; border-radius:16px; padding:16px; margin-top:30px; font-size:0.85rem; color:#333; border:1px solid #dee2e6; }
-.disclaimer-box h4 { margin-top:0; }
-.disclaimer-box ul { columns:2; list-style:none; padding-left:0; }
-.disclaimer-box li { padding:2px 0; }
-.rank-scale { display:flex; flex-wrap:wrap; gap:12px; margin-top:8px; background:#fff; padding:10px; border-radius:12px; border:1px solid #e0e0e0; }
-.rank-item { flex:1; min-width:80px; text-align:center; border-right:1px solid #e0e0e0; padding:0 8px; }
-.rank-item:last-child { border-right:none; }
-.rank-item .rank-name { font-weight:bold; color:#1a1a2e; }
-.rank-item .rank-points { font-size:0.75rem; color:#666; }
-@media (max-width:640px){.metrics-grid{grid-template-columns:1fr}.metric-value{font-size:1.6rem}.metric-daily-target{font-size:1.6rem}.navbar{flex-direction:column;gap:8px;align-items:stretch}.form-row{flex-direction:column;gap:12px}.disclaimer-box ul{columns:1}}
+*{margin:0;padding:0;box-sizing:border-box}body{background:#f0f2f5;font-family:system-ui;padding:12px}.container{max-width:1400px;margin:0 auto}.navbar{background:linear-gradient(135deg,#1a1a2e,#16213e);color:#fff;padding:12px 16px;border-radius:16px;margin-bottom:20px;display:flex;justify-content:space-between;flex-wrap:wrap;align-items:center}.logo{font-size:1.3rem;font-weight:bold}.nav-links{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.nav-links a{color:#ccc;text-decoration:none;font-size:0.85rem}.nav-links .user-info{color:#fff;font-weight:bold;margin-left:auto;font-size:0.9rem}.date-form{display:flex;gap:8px;align-items:center;margin-left:12px}.date-form input[type="date"]{padding:5px 8px;border-radius:8px;border:none;font-size:0.85rem}.date-form button{background:#fff;color:#1a1a2e;border:none;padding:5px 12px;border-radius:8px;font-weight:bold;cursor:pointer;font-size:0.85rem}.filter-bar{background:#f8f9fa;border-radius:16px;padding:12px 16px;margin-bottom:20px;display:flex;flex-wrap:wrap;gap:16px;align-items:center}.filter-bar select{padding:6px 10px;border-radius:8px;border:1px solid #ccc;font-size:0.85rem}.filter-bar label{font-weight:600;font-size:0.85rem;color:#333}.rank-card{background:linear-gradient(135deg,#f5af19,#f12711);color:#fff;padding:10px 16px;border-radius:16px;margin-bottom:20px;display:flex;justify-content:space-between;font-weight:bold}.ai-card{background:#e6f7ff;border-left:5px solid #1890ff;padding:12px 16px;border-radius:12px;margin-bottom:20px;display:flex;align-items:center;gap:12px}.notif-card{background:#fff3e0;border-left:5px solid #ff9800;padding:12px 16px;border-radius:12px;margin-bottom:20px;display:flex;flex-direction:column;gap:8px}.notif-item{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:0.9rem}.notif-text{flex:1}.notif-close{background:none;border:none;color:#888;cursor:pointer;font-size:1.2rem;line-height:1}.read-all-btn{background:#ff9800;color:#fff;border:none;padding:6px 14px;border-radius:16px;cursor:pointer;font-size:0.8rem;font-weight:bold;align-self:flex-end}.quest-card{background:#f0f9ff;border-left:5px solid #7c3aed;padding:12px 16px;border-radius:12px;margin-bottom:20px;display:flex;align-items:center;gap:12px;text-decoration:none;color:inherit;cursor:pointer}.leads-card{background:#f0f4ff;border-left:5px solid #1a73e8;padding:12px 16px;border-radius:12px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center}.leads-card a{background:#1a73e8;color:#fff;padding:8px 16px;border-radius:20px;text-decoration:none;font-weight:bold}.metrics-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;margin-bottom:30px}.metric-card{background:#fff;border-radius:16px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,0.05)}.metric-header{display:flex;justify-content:space-between;margin-bottom:8px;font-size:0.8rem;color:#555}.metric-title{font-weight:600}.metric-value-row{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}.metric-value{font-size:1.9rem;font-weight:800;line-height:1.2}.metric-value.success{color:#2e7d32}.metric-value.warning{color:#ed6c02}.metric-value.danger{color:#d32f2f}.metric-daily-target{font-size:1.9rem;font-weight:800;color:#1a1a2e}.metric-sub{font-size:0.7rem;color:#666;margin-top:6px}.metric-plan-fact{font-size:0.7rem;color:#555;margin-top:4px;display:flex;justify-content:space-between}.progress-bar{background:#e0e0e0;border-radius:10px;height:6px;margin-top:8px;overflow:hidden}.progress-fill{height:100%;border-radius:10px}.progress-fill.success{background:#2e7d32}.progress-fill.warning{background:#ed6c02}.progress-fill.danger{background:#d32f2f}.report-form{background:#fff;border-radius:16px;padding:20px;margin-bottom:30px}.form-row{display:flex;flex-wrap:wrap;gap:16px;margin-bottom:20px}.form-group{flex:1;min-width:140px}.form-group label{font-size:0.7rem;font-weight:600;color:#444;display:block;margin-bottom:4px}.form-group input{width:100%;padding:10px 12px;border:1px solid #ccc;border-radius:12px;font-size:1rem}.inn-group{display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap}.inn-group input{flex:2;min-width:100px;padding:10px 8px}.inn-group select{flex:1;min-width:70px;padding:10px 4px}.inn-group label{font-size:0.75rem;display:flex;align-items:center;gap:4px;white-space:nowrap}.add-btn{background:#28a745;color:#fff;border:none;padding:10px 16px;border-radius:12px;cursor:pointer;font-size:0.85rem;white-space:nowrap;font-weight:bold}.readonly-input{background:#f5f5f5;cursor:default}.save-btn{background:#1890ff;color:#fff;border:none;padding:12px 20px;border-radius:30px;cursor:pointer;font-size:1rem;width:100%}.history-table{overflow-x:auto}table{width:100%;background:#fff;border-radius:16px;border-collapse:collapse}th,td{padding:10px 6px;text-align:center;border-bottom:1px solid #eee;font-size:0.75rem}th{background:#f8f9fa}.edit-link{color:#1a73e8;cursor:pointer;font-size:0.85rem;text-decoration:underline}.team-dashboard{margin-bottom:30px;overflow-x:auto;background:#fff;border-radius:16px;padding:16px}.team-dashboard h3{margin-bottom:15px}.team-dashboard table{font-size:0.7rem;width:100%;border-collapse:collapse}.team-dashboard th,.team-dashboard td{padding:6px 4px;border:1px solid #eee;text-align:center}.team-dashboard th{background:#f8f9fa}.weekend{background-color:#f5f5f5}.team-period-form{display:flex;gap:10px;margin-bottom:12px;align-items:center;flex-wrap:wrap}.team-period-form input[type="date"]{padding:5px 8px;border-radius:8px;border:1px solid #ccc;font-size:0.85rem}.team-period-form button{background:#1a73e8;color:#fff;border:none;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:0.85rem}.expected-input{width:55px;padding:2px;font-size:0.7rem}.disclaimer-box{background:#f8f9fa;border-radius:16px;padding:16px;margin-top:30px;font-size:0.85rem;color:#333;border:1px solid #dee2e6}.disclaimer-box h4{margin-top:0}.disclaimer-box ul{columns:2;list-style:none;padding-left:0}.disclaimer-box li{padding:2px 0}.rank-scale{display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;background:#fff;padding:10px;border-radius:12px;border:1px solid #e0e0e0}.rank-item{flex:1;min-width:80px;text-align:center;border-right:1px solid #e0e0e0;padding:0 8px}.rank-item:last-child{border-right:none}.rank-item .rank-name{font-weight:bold;color:#1a1a2e}.rank-item .rank-points{font-size:0.75rem;color:#666}@media(max-width:640px){.metrics-grid{grid-template-columns:1fr}.metric-value{font-size:1.6rem}.metric-daily-target{font-size:1.6rem}.navbar{flex-direction:column;gap:8px;align-items:stretch}.form-row{flex-direction:column;gap:12px}.disclaimer-box ul{columns:1}.filter-bar{flex-direction:column;align-items:stretch}}
 </style></head>
 <body><div class="container"><div class="navbar">
 <div class="logo">🚀 SZB</div>
@@ -472,6 +544,28 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
 </div>
 </div>
 
+<!-- ===== ФИЛЬТРЫ (исправлены) ===== -->
+<form method="GET" class="filter-bar" action="dashboard.php">
+    <label>Ключевой:</label>
+    <select name="filter_key" onchange="this.form.submit()">
+        <option value="all" <?= $filter_key == 'all' ? 'selected' : '' ?>>Все</option>
+        <option value="key" <?= $filter_key == 'key' ? 'selected' : '' ?>>Ключевой</option>
+        <option value="nonkey" <?= $filter_key == 'nonkey' ? 'selected' : '' ?>>Неключевой</option>
+    </select>
+
+    <label>Станция:</label>
+    <select name="filter_station" onchange="this.form.submit()">
+        <option value="all" <?= $filter_station == 'all' ? 'selected' : '' ?>>Все</option>
+        <option value="pirate" <?= $filter_station == 'pirate' ? 'selected' : '' ?>>Пиратская</option>
+        <option value="target" <?= $filter_station == 'target' ? 'selected' : '' ?>>Целевой список</option>
+        <option value="newreg" <?= $filter_station == 'newreg' ? 'selected' : '' ?>>Новорег</option>
+    </select>
+
+    <input type="hidden" name="date" value="<?= $selected_date ?>">
+    <button type="submit" style="background:#1a73e8; color:#fff; border:none; padding:6px 12px; border-radius:8px; cursor:pointer;">Применить</button>
+</form>
+<!-- ===== КОНЕЦ ФИЛЬТРОВ ===== -->
+
 <!-- Динамический рейтинг -->
 <div class="rank-card">
     <div>🏆 <?= htmlspecialchars($g['rank']) ?> | Ур. <?= $g['level'] ?></div>
@@ -491,7 +585,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
     </div>
 </div>
 
-<!-- Лиды (для менеджеров и руководителей) -->
+<!-- Лиды -->
 <?php if (in_array($user_role, ['manager', 'head', 'admin', 'mmb_tp_head'])): ?>
 <div class="leads-card">
     <div>
@@ -502,7 +596,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
 </div>
 <?php endif; ?>
 
-<!-- Квесты (только для менеджеров) -->
+<!-- Квесты -->
 <?php if ($user_role == 'manager'): ?>
 <a href="quests.php" class="quest-card">
     <div style="font-size:2rem;">🎯</div>
@@ -579,17 +673,73 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
         <div class="form-group"><label>🏦 РКО</label><input type="number" name="rko" value="<?= $today_data['rko']??0 ?>"></div>
     </div>
     <div class="form-row">
-        <div class="form-group"><label>📝 ТЭ</label><input type="text" name="registrations_display" id="reg_display" class="readonly-input" readonly value="<?= $today_data['registrations']??0 ?>"><input type="hidden" name="registrations" id="reg_val" value="<?= $today_data['registrations']??0 ?>">
-            <div class="inn-group"><input type="text" id="inn_reg" placeholder="ИНН"><select id="prod_reg"><option>ТЭ</option></select><button type="button" class="add-btn" onclick="addInn('reg')">+1</button></div>
+        <!-- ТЭ -->
+        <div class="form-group">
+            <label>📝 ТЭ</label>
+            <input type="text" name="registrations_display" id="reg_display" class="readonly-input" readonly value="<?= $today_data['registrations']??0 ?>">
+            <input type="hidden" name="registrations" id="reg_val" value="<?= $today_data['registrations']??0 ?>">
+            <div class="inn-group">
+                <input type="text" id="inn_reg" placeholder="ИНН">
+                <select id="prod_reg"><option>ТЭ</option></select>
+                <label><input type="checkbox" id="key_reg" value="1"> Ключ.</label>
+                <select id="station_reg" style="font-size:0.8rem; padding:4px;">
+                    <option value="newreg">Новорег</option>
+                    <option value="pirate">Пиратская</option>
+                    <option value="target">Целевой список</option>
+                </select>
+                <button type="button" class="add-btn" onclick="addInn('reg')">+1</button>
+            </div>
         </div>
-        <div class="form-group"><label>🖥️ ПОС</label><input type="text" name="pos_systems_display" id="pos_display" class="readonly-input" readonly value="<?= $today_data['pos_systems']??0 ?>"><input type="hidden" name="pos_systems" id="pos_val" value="<?= $today_data['pos_systems']??0 ?>">
-            <div class="inn-group"><input type="text" id="inn_pos" placeholder="ИНН"><select id="prod_pos"><option>ПОС</option></select><button type="button" class="add-btn" onclick="addInn('pos')">+1</button></div>
+        <!-- ПОС -->
+        <div class="form-group">
+            <label>🖥️ ПОС</label>
+            <input type="text" name="pos_systems_display" id="pos_display" class="readonly-input" readonly value="<?= $today_data['pos_systems']??0 ?>">
+            <input type="hidden" name="pos_systems" id="pos_val" value="<?= $today_data['pos_systems']??0 ?>">
+            <div class="inn-group">
+                <input type="text" id="inn_pos" placeholder="ИНН">
+                <select id="prod_pos"><option>ПОС</option></select>
+                <label><input type="checkbox" id="key_pos" value="1"> Ключ.</label>
+                <select id="station_pos" style="font-size:0.8rem; padding:4px;">
+                    <option value="newreg">Новорег</option>
+                    <option value="pirate">Пиратская</option>
+                    <option value="target">Целевой список</option>
+                </select>
+                <button type="button" class="add-btn" onclick="addInn('pos')">+1</button>
+            </div>
         </div>
-        <div class="form-group"><label>💳 Смарт</label><input type="text" name="smart_cash_display" id="smart_display" class="readonly-input" readonly value="<?= $today_data['smart_cash']??0 ?>"><input type="hidden" name="smart_cash" id="smart_val" value="<?= $today_data['smart_cash']??0 ?>">
-            <div class="inn-group"><input type="text" id="inn_smart" placeholder="ИНН"><select id="prod_smart"><option>Смарт</option></select><button type="button" class="add-btn" onclick="addInn('smart')">+1</button></div>
+        <!-- Смарт -->
+        <div class="form-group">
+            <label>💳 Смарт</label>
+            <input type="text" name="smart_cash_display" id="smart_display" class="readonly-input" readonly value="<?= $today_data['smart_cash']??0 ?>">
+            <input type="hidden" name="smart_cash" id="smart_val" value="<?= $today_data['smart_cash']??0 ?>">
+            <div class="inn-group">
+                <input type="text" id="inn_smart" placeholder="ИНН">
+                <select id="prod_smart"><option>Смарт</option></select>
+                <label><input type="checkbox" id="key_smart" value="1"> Ключ.</label>
+                <select id="station_smart" style="font-size:0.8rem; padding:4px;">
+                    <option value="newreg">Новорег</option>
+                    <option value="pirate">Пиратская</option>
+                    <option value="target">Целевой список</option>
+                </select>
+                <button type="button" class="add-btn" onclick="addInn('smart')">+1</button>
+            </div>
         </div>
-        <div class="form-group"><label>🍵 ИНН чаевые</label><input type="text" name="inn_leads_display" id="inn_display" class="readonly-input" readonly value="<?= $today_data['inn_leads']??0 ?>"><input type="hidden" name="inn_leads" id="inn_val" value="<?= $today_data['inn_leads']??0 ?>">
-            <div class="inn-group"><input type="text" id="inn_tea" placeholder="ИНН"><select id="prod_tea"><option>Чаевые</option></select><button type="button" class="add-btn" onclick="addInn('tea')">+1</button></div>
+        <!-- Чаевые -->
+        <div class="form-group">
+            <label>🍵 ИНН чаевые</label>
+            <input type="text" name="inn_leads_display" id="inn_display" class="readonly-input" readonly value="<?= $today_data['inn_leads']??0 ?>">
+            <input type="hidden" name="inn_leads" id="inn_val" value="<?= $today_data['inn_leads']??0 ?>">
+            <div class="inn-group">
+                <input type="text" id="inn_tea" placeholder="ИНН">
+                <select id="prod_tea"><option>Чаевые</option></select>
+                <label><input type="checkbox" id="key_tea" value="1"> Ключ.</label>
+                <select id="station_tea" style="font-size:0.8rem; padding:4px;">
+                    <option value="newreg">Новорег</option>
+                    <option value="pirate">Пиратская</option>
+                    <option value="target">Целевой список</option>
+                </select>
+                <button type="button" class="add-btn" onclick="addInn('tea')">+1</button>
+            </div>
         </div>
     </div>
     <button type="submit" class="save-btn">💾 Сохранить</button>
@@ -604,6 +754,8 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
         <input type="date" name="team_from" value="<?= $team_from ?>">
         <label>по</label>
         <input type="date" name="team_to" value="<?= $team_to ?>">
+        <input type="hidden" name="filter_key" value="<?= $filter_key ?>">
+        <input type="hidden" name="filter_station" value="<?= $filter_station ?>">
         <button type="submit">Показать</button>
     </form>
     <div style="overflow-x:auto;">
@@ -685,7 +837,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
     <td><span class="edit-link" onclick="editReport('<?= $row['report_date'] ?>', <?= $row['calls'] ?>, <?= $row['calls_answered'] ?>, <?= $row['meetings'] ?>, <?= $row['contracts'] ?>, <?= $row['registrations'] ?>, <?= $row['smart_cash'] ?>, <?= $row['pos_systems'] ?>, <?= $row['inn_leads'] ?>, <?= $row['teams'] ?>, <?= $row['turnover'] ?>, <?= $row['rko'] ?? 0 ?>)">✏️</span></td>
             </tr><?php endforeach; ?></tbody></table><?php else: ?><p>Нет отчётов</p><?php endif; ?></div>
 
-<!-- ========== ДИСКЛЕЙМЕР ПО БАЛЛАМ РЕЙТИНГА ========== -->
+<!-- ========== ДИСКЛЕЙМЕР ========== -->
 <div class="disclaimer-box">
     <h4>🏅 Цена баллов рейтинга</h4>
     <p>Баллы начисляются за действия в отчёте (за каждый показатель, если он > 0):</p>
@@ -701,7 +853,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
         <li>👥 Команды — 4 балла</li>
         <li>💰 Оборот чаевых — 1 балл за каждые 10 000 ₽</li>
         <li>🏦 РКО — 1 балл (за факт наличия)</li>
-        <li style="color:#d32f2f;">⚠️ Штраф за пустой отчёт (ничего не заполнено) — -5 баллов</li>
+        <li style="color:#d32f2f;">⚠️ Штраф за пустой отчёт — -5 баллов</li>
     </ul>
     <p style="margin-top:8px; font-size:0.8rem; color:#666;">Договоры не дают баллов, так как это договор на последующие продукты.</p>
 
@@ -751,15 +903,47 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
 <script>
 function addInn(type) {
     let inn='', prod='', field='', display='';
-    if(type==='reg'){ inn=document.getElementById('inn_reg').value; prod=document.getElementById('prod_reg').value; field='reg_val'; display='reg_display'; }
-    else if(type==='pos'){ inn=document.getElementById('inn_pos').value; prod=document.getElementById('prod_pos').value; field='pos_val'; display='pos_display'; }
-    else if(type==='smart'){ inn=document.getElementById('inn_smart').value; prod=document.getElementById('prod_smart').value; field='smart_val'; display='smart_display'; }
-    else if(type==='tea'){ inn=document.getElementById('inn_tea').value; prod=document.getElementById('prod_tea').value; field='inn_val'; display='inn_display'; }
+    let is_key = 0, station_type = 'newreg';
+    if(type==='reg'){
+        inn=document.getElementById('inn_reg').value;
+        prod=document.getElementById('prod_reg').value;
+        field='reg_val';
+        display='reg_display';
+        is_key = document.getElementById('key_reg').checked ? 1 : 0;
+        station_type = document.getElementById('station_reg').value;
+    } else if(type==='pos'){
+        inn=document.getElementById('inn_pos').value;
+        prod=document.getElementById('prod_pos').value;
+        field='pos_val';
+        display='pos_display';
+        is_key = document.getElementById('key_pos').checked ? 1 : 0;
+        station_type = document.getElementById('station_pos').value;
+    } else if(type==='smart'){
+        inn=document.getElementById('inn_smart').value;
+        prod=document.getElementById('prod_smart').value;
+        field='smart_val';
+        display='smart_display';
+        is_key = document.getElementById('key_smart').checked ? 1 : 0;
+        station_type = document.getElementById('station_smart').value;
+    } else if(type==='tea'){
+        inn=document.getElementById('inn_tea').value;
+        prod=document.getElementById('prod_tea').value;
+        field='inn_val';
+        display='inn_display';
+        is_key = document.getElementById('key_tea').checked ? 1 : 0;
+        station_type = document.getElementById('station_tea').value;
+    }
     if(!inn){ alert('Введите ИНН'); return; }
     fetch('/api_add_inn.php',{
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({inn:inn, product:prod, field_type:type})
+        body:JSON.stringify({
+            inn:inn,
+            product:prod,
+            field_type:type,
+            is_key:is_key,
+            station_type:station_type
+        })
     })
     .then(r=>r.json())
     .then(d=>{
@@ -772,6 +956,8 @@ function addInn(type) {
                 disp.value = newVal;
             }
             document.getElementById('inn_'+type).value='';
+            document.getElementById('key_'+type).checked = false;
+            document.getElementById('station_'+type).value = 'newreg';
             alert('✅ Добавлено');
         } else alert('Ошибка: '+d.error);
     })

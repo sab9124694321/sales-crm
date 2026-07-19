@@ -21,13 +21,17 @@ $date_from = $_GET['date_from'] ?? date('Y-m-01', strtotime($date_to));
 $tomorrow  = date('Y-m-d', strtotime('+1 day'));
 $selected_month = date('Y-m', strtotime($date_from));
 
+// Фильтры (передаются через GET)
+$key_type = $_GET['key_type'] ?? 'all';
+$pirate_type = $_GET['pirate_type'] ?? 'all';
+
 // ------------------------------------------------------------------
 // Функция подсчёта количества рабочих дней (пн-пт) между двумя датами (включительно)
 // ------------------------------------------------------------------
 function getWorkingDaysCount($start_date, $end_date) {
     $start = new DateTime($start_date);
     $end   = new DateTime($end_date);
-    $end->modify('+1 day'); // включаем конечную дату
+    $end->modify('+1 day');
     $interval = DateInterval::createFromDateString('1 day');
     $period = new DatePeriod($start, $interval, $end);
     $workingDays = 0;
@@ -39,9 +43,9 @@ function getWorkingDaysCount($start_date, $end_date) {
 }
 
 $month_start = date('Y-m-01', strtotime($date_to));
-$days_passed      = getWorkingDaysCount($month_start, $date_to);          // прошедшие рабочие дни
-$work_days_total  = getWorkingDaysCount($month_start, date('Y-m-t', strtotime($date_to))); // всего рабочих дней в месяце
-$days_left        = max(0, $work_days_total - $days_passed);               // оставшиеся рабочие дни
+$days_passed      = getWorkingDaysCount($month_start, $date_to);
+$work_days_total  = getWorkingDaysCount($month_start, date('Y-m-t', strtotime($date_to)));
+$days_left        = max(0, $work_days_total - $days_passed);
 
 // ------------------------------------------------------------------
 // Функция расчёта метрик (прогноз, цель на день, статус) – использует РАБОЧИЕ дни
@@ -51,62 +55,24 @@ function calcTeamMetrics($plan, $fact, $days_passed, $days_left, $work_days_tota
         return ['forecast' => 0, 'daily_target' => 0, 'status' => 'none', 'percent' => 0];
     }
     $percent = ($plan > 0) ? round(($fact / $plan) * 100) : 0;
-    
-    // Если план уже выполнен или перевыполнен
     if ($fact >= $plan) {
-        return [
-            'forecast' => $fact,
-            'daily_target' => 0,
-            'status' => 'success',
-            'percent' => min(100, $percent)
-        ];
+        return ['forecast' => $fact, 'daily_target' => 0, 'status' => 'success', 'percent' => min(100, $percent)];
     }
-    
-    // Если нет прошедших рабочих дней (начало месяца)
     if ($days_passed == 0) {
         $daily_target = ceil($plan / max(1, $work_days_total));
-        $forecast = $plan;
-        $status = 'warning';
-        return [
-            'forecast' => $forecast,
-            'daily_target' => $daily_target,
-            'status' => $status,
-            'percent' => $percent
-        ];
+        return ['forecast' => $plan, 'daily_target' => $daily_target, 'status' => 'warning', 'percent' => $percent];
     }
-    
-    // Если оставшихся дней нет (конец месяца)
     if ($days_left == 0) {
-        return [
-            'forecast' => $fact,
-            'daily_target' => 0,
-            'status' => 'danger',
-            'percent' => $percent
-        ];
+        return ['forecast' => $fact, 'daily_target' => 0, 'status' => 'danger', 'percent' => $percent];
     }
-    
-    // Основной расчёт
     $ideal = ceil($plan / max(1, $work_days_total));
     $should_be = $ideal * $days_passed;
     $deviation = $should_be - $fact;
-    
-    if ($deviation > 0) {
-        $daily_target = ceil(($plan - $fact) / $days_left);
-    } else {
-        $daily_target = $ideal;
-    }
-    
+    $daily_target = ($deviation > 0) ? ceil(($plan - $fact) / $days_left) : $ideal;
     $avg_per_day = $fact / $days_passed;
     $forecast = round($avg_per_day * $work_days_total);
-    
     $status = ($forecast >= $plan) ? 'warning' : 'danger';
-    
-    return [
-        'forecast' => $forecast,
-        'daily_target' => $daily_target,
-        'status' => $status,
-        'percent' => $percent
-    ];
+    return ['forecast' => $forecast, 'daily_target' => $daily_target, 'status' => $status, 'percent' => $percent];
 }
 
 $level = $_GET['level'] ?? 'root';
@@ -117,9 +83,54 @@ $managers = [];
 $employees = [];
 
 // ------------------------------------------------------------------
-// Функция агрегации метрик для набора пользователей
+// Функция получения продуктов из inn_records для одного менеджера
+// (с проверкой наличия колонок is_key и station_type)
+// ------------------------------------------------------------------
+function getProductSumsFromInn($pdo, $tabel, $date_from, $date_to, $key_type, $pirate_type) {
+    // Проверяем наличие колонок is_key и station_type
+    $cols = $pdo->query("PRAGMA table_info(inn_records)")->fetchAll(PDO::FETCH_COLUMN, 1);
+    $hasKey = in_array('is_key', $cols);
+    $hasStation = in_array('station_type', $cols);
+
+    $sql = "
+        SELECT 
+            COALESCE(SUM(CASE WHEN product = 'ТЭ' THEN 1 ELSE 0 END), 0) as registrations,
+            COALESCE(SUM(CASE WHEN product = 'Смарт' THEN 1 ELSE 0 END), 0) as smart_cash,
+            COALESCE(SUM(CASE WHEN product = 'ПОС' THEN 1 ELSE 0 END), 0) as pos_systems,
+            COALESCE(SUM(CASE WHEN product = 'Чаевые' THEN 1 ELSE 0 END), 0) as inn_leads
+        FROM inn_records
+        WHERE employee_tabel = ?
+          AND DATE(sale_date) BETWEEN ? AND ?
+    ";
+    $params = [$tabel, $date_from, $date_to];
+
+    if ($hasKey) {
+        if ($key_type === 'key') {
+            $sql .= " AND is_key = 1";
+        } elseif ($key_type === 'nonkey') {
+            $sql .= " AND is_key = 0";
+        }
+    }
+    if ($hasStation) {
+        if ($pirate_type === 'pirate') {
+            $sql .= " AND station_type = 'pirate'";
+        } elseif ($pirate_type === 'newreg') {
+            $sql .= " AND station_type = 'newreg'";
+        }
+    }
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) $row = ['registrations' => 0, 'smart_cash' => 0, 'pos_systems' => 0, 'inn_leads' => 0];
+    return $row;
+}
+
+// ------------------------------------------------------------------
+// Функция агрегации метрик для набора пользователей (использует inn_records)
 // ------------------------------------------------------------------
 function getAggregatedMetrics($user_ids, $pdo, $selected_month, $date_from, $date_to, $days_passed, $days_left, $work_days_total) {
+    global $key_type, $pirate_type;
     $total_plans = [
         'calls_plan'=>0, 'calls_answered_plan'=>0, 'meetings_plan'=>0, 'contracts_plan'=>0,
         'registrations_plan'=>0, 'smart_cash_plan'=>0, 'pos_systems_plan'=>0,
@@ -135,11 +146,14 @@ function getAggregatedMetrics($user_ids, $pdo, $selected_month, $date_from, $dat
         'registrations'=>0, 'smart_cash'=>0, 'pos_systems'=>0,
         'inn_leads'=>0, 'teams'=>0, 'turnover'=>0, 'rko'=>0
     ];
+
     foreach ($user_ids as $uid) {
         $stmt = $pdo->prepare("SELECT tabel_number FROM users WHERE id = ?");
         $stmt->execute([$uid]);
         $tabel = $stmt->fetchColumn();
         if (!$tabel) continue;
+
+        // Планы (без изменений)
         $stmt = $pdo->prepare("SELECT * FROM plans WHERE tabel_number = ? AND period = ?");
         $stmt->execute([$tabel, $selected_month]);
         $plans = $stmt->fetch();
@@ -148,31 +162,51 @@ function getAggregatedMetrics($user_ids, $pdo, $selected_month, $date_from, $dat
                 $total_plans[$f.'_plan'] += $plans[$f.'_plan'] ?? 0;
             }
         }
-        $stmt = $pdo->prepare("SELECT 
-            COALESCE(SUM(calls),0) as calls, COALESCE(SUM(calls_answered),0) as calls_answered,
-            COALESCE(SUM(meetings),0) as meetings, COALESCE(SUM(contracts),0) as contracts,
-            COALESCE(SUM(registrations),0) as registrations, COALESCE(SUM(smart_cash),0) as smart_cash,
-            COALESCE(SUM(pos_systems),0) as pos_systems, COALESCE(SUM(inn_leads),0) as inn_leads,
-            COALESCE(SUM(teams),0) as teams, COALESCE(SUM(turnover),0) as turnover,
-            COALESCE(SUM(rko),0) as rko, COALESCE(SUM(ai_calls),0) as ai_calls
-            FROM daily_reports WHERE tabel_number = ? AND report_date BETWEEN ? AND ?
+
+        // Факт за период: основные метрики из daily_reports
+        $stmt = $pdo->prepare("
+            SELECT 
+                COALESCE(SUM(calls),0) as calls,
+                COALESCE(SUM(calls_answered),0) as calls_answered,
+                COALESCE(SUM(meetings),0) as meetings,
+                COALESCE(SUM(contracts),0) as contracts,
+                COALESCE(SUM(teams),0) as teams,
+                COALESCE(SUM(turnover),0) as turnover,
+                COALESCE(SUM(rko),0) as rko,
+                COALESCE(SUM(ai_calls),0) as ai_calls
+            FROM daily_reports
+            WHERE tabel_number = ? AND report_date BETWEEN ? AND ?
         ");
         $stmt->execute([$tabel, $date_from, $date_to]);
         $factP = $stmt->fetch();
         if ($factP) {
-            foreach (['calls','calls_answered','meetings','contracts','registrations','smart_cash','pos_systems','inn_leads','teams','turnover','rko','ai_calls'] as $f) {
+            foreach (['calls','calls_answered','meetings','contracts','teams','turnover','rko','ai_calls'] as $f) {
                 $total_fact_period[$f] += $factP[$f];
             }
         }
-        $stmt = $pdo->prepare("SELECT calls, calls_answered, meetings, contracts, registrations, smart_cash, pos_systems, inn_leads, teams, turnover, rko FROM daily_reports WHERE tabel_number = ? AND report_date = ?");
+
+        // Продукты из inn_records (за период)
+        $prod = getProductSumsFromInn($pdo, $tabel, $date_from, $date_to, $key_type, $pirate_type);
+        foreach (['registrations','smart_cash','pos_systems','inn_leads'] as $f) {
+            $total_fact_period[$f] += $prod[$f];
+        }
+
+        // Факт за сегодня (текущий день)
+        $stmt = $pdo->prepare("SELECT calls, calls_answered, meetings, contracts, teams, turnover, rko FROM daily_reports WHERE tabel_number = ? AND report_date = ?");
         $stmt->execute([$tabel, $date_to]);
         $factD = $stmt->fetch();
         if ($factD) {
-            foreach (['calls','calls_answered','meetings','contracts','registrations','smart_cash','pos_systems','inn_leads','teams','turnover','rko'] as $f) {
+            foreach (['calls','calls_answered','meetings','contracts','teams','turnover','rko'] as $f) {
                 $total_fact_today[$f] += $factD[$f];
             }
         }
+        // Продукты за сегодня (из inn_records)
+        $prodToday = getProductSumsFromInn($pdo, $tabel, $date_to, $date_to, $key_type, $pirate_type);
+        foreach (['registrations','smart_cash','pos_systems','inn_leads'] as $f) {
+            $total_fact_today[$f] += $prodToday[$f];
+        }
     }
+
     $metrics = [
         'calls'          => ['plan'=>$total_plans['calls_plan'], 'fact'=>$total_fact_period['calls'], 'today_fact'=>$total_fact_today['calls'], 'label'=>'Звонки', 'icon'=>'📞', 'unit'=>''],
         'calls_answered' => ['plan'=>$total_plans['calls_answered_plan'], 'fact'=>$total_fact_period['calls_answered'], 'today_fact'=>$total_fact_today['calls_answered'], 'label'=>'Дозвоны', 'icon'=>'✅', 'unit'=>'', 'ai_calls'=>$total_fact_period['ai_calls']],
@@ -186,6 +220,7 @@ function getAggregatedMetrics($user_ids, $pdo, $selected_month, $date_from, $dat
         'teams'          => ['plan'=>$total_plans['teams_plan'], 'fact'=>$total_fact_period['teams'], 'today_fact'=>$total_fact_today['teams'], 'label'=>'Команды', 'icon'=>'👥', 'unit'=>''],
         'rko'            => ['plan'=>$total_plans['rko_plan'], 'fact'=>$total_fact_period['rko'], 'today_fact'=>$total_fact_today['rko'], 'label'=>'РКО', 'icon'=>'🏦', 'unit'=>'₽']
     ];
+
     $result = [];
     foreach ($metrics as $key => $m) {
         $calc = calcTeamMetrics($m['plan'], $m['fact'], $days_passed, $days_left, $work_days_total);
@@ -325,7 +360,7 @@ function renderMetricsGrid($metrics, $title = '', $days_passed = 0) {
         $icon = $m['icon'];
         $label = $m['label'];
         $unit = $m['unit'];
-        $avg_per_day = $days_passed > 0 ? ($m['plan'] > 0 ? round($m['fact'] / $days_passed, 1) : 0) : 0;
+        $avg_per_day = $days_passed > 0 ? round($m['fact'] / $days_passed, 1) : 0;
         if ($m['unit'] == '₽') {
             $avg_per_day_formatted = number_format($avg_per_day, 2, '.', ' ');
         } else {
@@ -364,9 +399,10 @@ function renderCards($items, $type, $date_from = '', $date_to = '') {
 }
 
 // ------------------------------------------------------------------
-// Таблица сотрудников (использует РАБОЧИЕ дни)
+// Таблица сотрудников (использует inn_records для продуктов)
 // ------------------------------------------------------------------
 function renderEmployeesTable($employees, $pdo, $days_passed, $days_left, $selected_month, $date_from, $date_to, $work_days_total) {
+    global $key_type, $pirate_type;
     if (empty($employees)) { echo "<p>Нет сотрудников для отображения</p>"; return; }
 
     $allColumns = [
@@ -403,8 +439,10 @@ function renderEmployeesTable($employees, $pdo, $days_passed, $days_left, $selec
     echo '</thead><tbody>';
 
     foreach ($employees as $emp) {
+        $tabel = $emp['tabel_number'];
+        // Планы
         $stmt = $pdo->prepare("SELECT * FROM plans WHERE tabel_number = ? AND period = ?");
-        $stmt->execute([$emp['tabel_number'], $selected_month]);
+        $stmt->execute([$tabel, $selected_month]);
         $plans = $stmt->fetch();
         if (!$plans) {
             $plans = [
@@ -413,26 +451,45 @@ function renderEmployeesTable($employees, $pdo, $days_passed, $days_left, $selec
                 'teams_plan'=>3, 'turnover_plan'=>1500000, 'rko_plan'=>0
             ];
         }
+
+        // Факт за период (основные метрики из daily_reports)
         $stmt = $pdo->prepare("
-            SELECT COALESCE(SUM(calls),0) as calls, COALESCE(SUM(calls_answered),0) as calls_answered,
-                COALESCE(SUM(meetings),0) as meetings, COALESCE(SUM(contracts),0) as contracts,
-                COALESCE(SUM(registrations),0) as registrations, COALESCE(SUM(smart_cash),0) as smart_cash,
-                COALESCE(SUM(pos_systems),0) as pos_systems, COALESCE(SUM(inn_leads),0) as inn_leads,
-                COALESCE(SUM(teams),0) as teams, COALESCE(SUM(turnover),0) as turnover,
-                COALESCE(SUM(rko),0) as rko, COALESCE(SUM(ai_calls),0) as ai_calls
-            FROM daily_reports WHERE tabel_number = ? AND report_date BETWEEN ? AND ?
+            SELECT COALESCE(SUM(calls),0) as calls,
+                COALESCE(SUM(calls_answered),0) as calls_answered,
+                COALESCE(SUM(meetings),0) as meetings,
+                COALESCE(SUM(contracts),0) as contracts,
+                COALESCE(SUM(teams),0) as teams,
+                COALESCE(SUM(turnover),0) as turnover,
+                COALESCE(SUM(rko),0) as rko,
+                COALESCE(SUM(ai_calls),0) as ai_calls
+            FROM daily_reports
+            WHERE tabel_number = ? AND report_date BETWEEN ? AND ?
         ");
-        $stmt->execute([$emp['tabel_number'], $date_from, $date_to]);
+        $stmt->execute([$tabel, $date_from, $date_to]);
         $factM = $stmt->fetch();
-        if (!$factM) $factM = array_fill_keys(['calls','calls_answered','meetings','contracts','registrations','smart_cash','pos_systems','inn_leads','teams','turnover','rko','ai_calls'], 0);
+        if (!$factM) $factM = array_fill_keys(['calls','calls_answered','meetings','contracts','teams','turnover','rko','ai_calls'], 0);
+
+        // Продукты из inn_records за период
+        $prod = getProductSumsFromInn($pdo, $tabel, $date_from, $date_to, $key_type, $pirate_type);
+        $factM['registrations'] = $prod['registrations'];
+        $factM['smart_cash']    = $prod['smart_cash'];
+        $factM['pos_systems']   = $prod['pos_systems'];
+        $factM['inn_leads']     = $prod['inn_leads'];
+
+        // Факт за сегодня (из daily_reports и inn_records)
         $stmt = $pdo->prepare("SELECT * FROM daily_reports WHERE tabel_number = ? AND report_date = ?");
-        $stmt->execute([$emp['tabel_number'], $date_to]);
+        $stmt->execute([$tabel, $date_to]);
         $factD = $stmt->fetch();
-        if (!$factD) $factD = array_fill_keys(['calls','calls_answered','meetings','contracts','registrations','smart_cash','pos_systems','inn_leads','teams','turnover','rko'], 0);
+        if (!$factD) $factD = array_fill_keys(['calls','calls_answered','meetings','contracts','teams','turnover','rko'], 0);
+        $prodToday = getProductSumsFromInn($pdo, $tabel, $date_to, $date_to, $key_type, $pirate_type);
+        $factD['registrations'] = $prodToday['registrations'];
+        $factD['smart_cash']    = $prodToday['smart_cash'];
+        $factD['pos_systems']   = $prodToday['pos_systems'];
+        $factD['inn_leads']     = $prodToday['inn_leads'];
 
         echo '<tr>';
         echo "<td><strong>{$emp['full_name']}</strong><br><span style='font-size:0.6rem;color:#888;'>факт мес | план мес | прогноз<br>факт день | цель/день | сред/день</span></td>";
-        echo "<td>{$emp['tabel_number']}</td>";
+        echo "<td>{$tabel}</td>";
 
         foreach ($visibleArray as $col) {
             $plan_month = $plans[$col.'_plan'] ?? 0;
@@ -465,11 +522,11 @@ function renderEmployeesTable($employees, $pdo, $days_passed, $days_left, $selec
         }
         echo '</tr>';
     }
-    echo '</tbody>;</div>';
+    echo '</tbody></table></div>';
 }
 
 // ------------------------------------------------------------------
-// ДАШБОРД КОМАНДЫ (ТЭ+Смарт+ПОС) – только рабочие дни (ИСПРАВЛЕН)
+// ДАШБОРД КОМАНДЫ (ТЭ+Смарт+ПОС) – с inn_records
 // ------------------------------------------------------------------
 $team_members = [];
 
@@ -491,30 +548,23 @@ if (isset($show_manager_summary) && $level == 'manager' && $selected_id > 0) {
     }
 }
 
-// ------------------------------------------------------------------
-// Все календарные дни ВЫБРАННОГО месяца (для шапки таблицы)
-// ------------------------------------------------------------------
+// Календарные дни
 $selected_month_cal = date('m', strtotime($date_to));
 $selected_year_cal = date('Y', strtotime($date_to));
 $days_in_month = (int)date('t', strtotime("$selected_year_cal-$selected_month_cal-01"));
 $calendar_days = [];
 for ($d = 1; $d <= $days_in_month; $d++) {
-    $date_str = sprintf('%04d-%02d-%02d', $selected_year_cal, $selected_month_cal, $d);
-    $calendar_days[] = $date_str;
+    $calendar_days[] = sprintf('%04d-%02d-%02d', $selected_year_cal, $selected_month_cal, $d);
 }
 
-// Функция проверки рабочего дня (оставляем для фильтрации)
 function isWorkingDay($date) { return date('N', strtotime($date)) < 6; }
 
-// ========== ИСПРАВЛЕННЫЙ РАСЧЁТ РАБОЧИХ ДНЕЙ через getWorkingDaysCount ==========
 $month_start = date('Y-m-01', strtotime($date_to));
 $total_work_days = getWorkingDaysCount($month_start, date('Y-m-t', strtotime($date_to)));
 $passed_work_days = getWorkingDaysCount($month_start, $date_to);
 $remaining_work_days = getWorkingDaysCount(date('Y-m-d', strtotime($date_to . ' +1 day')), date('Y-m-t', strtotime($date_to)));
 
-// ------------------------------------------------------------------
-// ИСПРАВЛЕННО: предыдущие месяцы (только строго меньше, чем месяц date_to)
-// ------------------------------------------------------------------
+// Предыдущие месяцы
 $prev_months = [];
 $temp = new DateTime($date_from);
 $temp->modify('first day of this month');
@@ -538,10 +588,9 @@ foreach ($team_members as $m) {
     $member_total_work = 0;
 
     foreach ($calendar_days as $date_str) {
-        // ИСПРАВЛЕНО: используем tabel_number вместо user_id
-        $stmt = $pdo->prepare("SELECT COALESCE(SUM(registrations),0) + COALESCE(SUM(smart_cash),0) + COALESCE(SUM(pos_systems),0) FROM daily_reports WHERE tabel_number = ? AND report_date = ?");
-        $stmt->execute([$tab, $date_str]);
-        $val = (int)$stmt->fetchColumn();
+        // Сумма ТЭ+Смарт+ПОС из inn_records за день (с фильтрами)
+        $prod_day = getProductSumsFromInn($pdo, $tab, $date_str, $date_str, $key_type, $pirate_type);
+        $val = $prod_day['registrations'] + $prod_day['smart_cash'] + $prod_day['pos_systems'];
         $daily_vals[$date_str] = $val;
         if ($date_str >= $date_from && $date_str <= $date_to) {
             $member_total_period += $val;
@@ -552,33 +601,37 @@ foreach ($team_members as $m) {
         $daily_totals[$date_str] += $val;
     }
 
-    // Данные за предыдущие месяцы (только если есть)
+    // Данные за предыдущие месяцы
     $prev_data = [];
     foreach ($prev_months as $ym) {
-        $stmt = $pdo->prepare("SELECT COALESCE(SUM(registrations),0) + COALESCE(SUM(smart_cash),0) + COALESCE(SUM(pos_systems),0) FROM daily_reports WHERE tabel_number = ? AND strftime('%Y-%m', report_date) = ? AND report_date BETWEEN ? AND ?");
-        $stmt->execute([$tab, $ym, $date_from, $date_to]);
-        $val = (int)$stmt->fetchColumn();
+        $first_day = date('Y-m-01', strtotime($ym));
+        $last_day = date('Y-m-t', strtotime($ym));
+        $from = max($first_day, $date_from);
+        $to = min($last_day, $date_to);
+        if ($from <= $to) {
+            $prod_prev = getProductSumsFromInn($pdo, $tab, $from, $to, $key_type, $pirate_type);
+            $val = $prod_prev['registrations'] + $prod_prev['smart_cash'] + $prod_prev['pos_systems'];
+        } else {
+            $val = 0;
+        }
         $prev_data[$ym] = $val;
         $member_total_period += $val;
         if (!isset($prev_month_totals[$ym])) {
-            $prev_month_totals[$ym] = ['total' => 0, 'members' => []];
+            $prev_month_totals[$ym] = ['total' => 0];
         }
         $prev_month_totals[$ym]['total'] += $val;
     }
 
-    // План
+    // План (сумма планов по ТЭ+Смарт+ПОС)
     $plan_stmt = $pdo->prepare("SELECT COALESCE(registrations_plan,0) + COALESCE(smart_cash_plan,0) + COALESCE(pos_systems_plan,0) AS total_plan FROM plans WHERE tabel_number = ? AND period = ?");
     $plan_stmt->execute([$tab, date('Y-m')]);
     $plan = $plan_stmt->fetchColumn() ?: 0;
     $total_plan += $plan;
     $total_fact_work += $member_total_work;
 
-    // Прогноз: (факт_за_рабочие_дни / прошедшие_рабочие_дни) * всего_рабочих_дней
     $avg_per_work_day = ($passed_work_days > 0) ? $member_total_work / $passed_work_days : 0;
     $forecast = round($avg_per_work_day * $total_work_days);
-
     $gap = max(0, $plan - $member_total_work);
-    // ЦЕЛЬ НА ДЕНЬ – корректно
     $daily_target = ($remaining_work_days > 0 && $gap > 0) ? ceil($gap / $remaining_work_days) : 0;
 
     $exp_stmt = $pdo->prepare("SELECT expected_calls FROM daily_forecasts WHERE tabel_number = ? AND forecast_date = ?");
@@ -606,7 +659,9 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
 ?>
 <!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>👥 Команда</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>
-*{margin:0;padding:0;box-sizing:border-box}body{background:#f0f2f5;font-family:system-ui;padding:12px}.container{max-width:1400px;margin:0 auto}.header{background:linear-gradient(135deg,#1a1a2e,#16213e);color:#fff;padding:12px 16px;border-radius:16px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap}.nav-links{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.nav-links a{color:#ccc;text-decoration:none;font-size:0.85rem}.user-info{color:#fff;font-weight:bold;margin-left:auto;font-size:0.9rem}.date-form{display:flex;gap:8px;align-items:center;margin-left:12px}.date-form input[type="date"]{padding:5px 8px;border-radius:8px;border:none;font-size:0.85rem}.date-form button{background:#fff;color:#1a1a2e;border:none;padding:5px 12px;border-radius:8px;font-weight:bold;cursor:pointer;font-size:0.85rem}.card-list{display:flex;flex-wrap:wrap;gap:20px;margin-bottom:30px}.card{background:#fff;border-radius:16px;padding:16px;width:280px;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,0.08);transition:0.2s;text-align:center}.card:hover{transform:translateY(-3px);box-shadow:0 4px 12px rgba(0,0,0,0.1)}.card h3{margin-bottom:6px;font-size:1.1rem}.metrics-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;margin-bottom:30px}.metric-card{background:#fff;border-radius:16px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,0.05)}.metric-header{display:flex;justify-content:space-between;margin-bottom:8px;font-size:0.8rem;color:#555}.metric-title{font-weight:600}.metric-value-row{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}.metric-value{font-size:1.8rem;font-weight:800;line-height:1.2}.metric-value.success{color:#2e7d32}.metric-value.warning{color:#ed6c02}.metric-value.danger{color:#d32f2f}.metric-daily-target{font-size:1.8rem;font-weight:800;color:#1a1a2e;cursor:help}.progress-bar{background:#e0e0e0;border-radius:10px;height:6px;margin-top:8px;overflow:hidden}.progress-fill{height:100%;border-radius:10px}.progress-fill.success{background:#2e7d32}.progress-fill.warning{background:#ed6c02}.progress-fill.danger{background:#d32f2f}.metric-plan-fact{font-size:0.7rem;color:#555;margin-top:6px;display:flex;justify-content:space-between}.metric-sub{font-size:0.7rem;color:#666;margin-top:4px}.back-link{display:inline-block;margin-bottom:15px;color:#667eea;text-decoration:none;font-weight:bold;background:#fff;padding:6px 12px;border-radius:20px;box-shadow:0 1px 2px rgba(0,0,0,0.05)}.column-toggles { margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 4px; }
+*{margin:0;padding:0;box-sizing:border-box}body{background:#f0f2f5;font-family:system-ui;padding:12px}.container{max-width:1400px;margin:0 auto}.header{background:linear-gradient(135deg,#1a1a2e,#16213e);color:#fff;padding:12px 16px;border-radius:16px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap}.nav-links{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.nav-links a{color:#ccc;text-decoration:none;font-size:0.85rem}.user-info{color:#fff;font-weight:bold;margin-left:auto;font-size:0.9rem}.date-form{display:flex;gap:8px;align-items:center;margin-left:12px}.date-form input[type="date"]{padding:5px 8px;border-radius:8px;border:none;font-size:0.85rem}.date-form button{background:#fff;color:#1a1a2e;border:none;padding:5px 12px;border-radius:8px;font-weight:bold;cursor:pointer;font-size:0.85rem}.filter-form-inline { display:flex; gap:8px; align-items:center; margin-left:12px; flex-wrap:wrap; }
+.filter-form-inline select { padding:5px 8px; border-radius:8px; border:none; font-size:0.85rem; background:#fff; color:#1a1a2e; }
+.card-list{display:flex;flex-wrap:wrap;gap:20px;margin-bottom:30px}.card{background:#fff;border-radius:16px;padding:16px;width:280px;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,0.08);transition:0.2s;text-align:center}.card:hover{transform:translateY(-3px);box-shadow:0 4px 12px rgba(0,0,0,0.1)}.card h3{margin-bottom:6px;font-size:1.1rem}.metrics-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;margin-bottom:30px}.metric-card{background:#fff;border-radius:16px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,0.05)}.metric-header{display:flex;justify-content:space-between;margin-bottom:8px;font-size:0.8rem;color:#555}.metric-title{font-weight:600}.metric-value-row{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}.metric-value{font-size:1.8rem;font-weight:800;line-height:1.2}.metric-value.success{color:#2e7d32}.metric-value.warning{color:#ed6c02}.metric-value.danger{color:#d32f2f}.metric-daily-target{font-size:1.8rem;font-weight:800;color:#1a1a2e;cursor:help}.progress-bar{background:#e0e0e0;border-radius:10px;height:6px;margin-top:8px;overflow:hidden}.progress-fill{height:100%;border-radius:10px}.progress-fill.success{background:#2e7d32}.progress-fill.warning{background:#ed6c02}.progress-fill.danger{background:#d32f2f}.metric-plan-fact{font-size:0.7rem;color:#555;margin-top:6px;display:flex;justify-content:space-between}.metric-sub{font-size:0.7rem;color:#666;margin-top:4px}.back-link{display:inline-block;margin-bottom:15px;color:#667eea;text-decoration:none;font-weight:bold;background:#fff;padding:6px 12px;border-radius:20px;box-shadow:0 1px 2px rgba(0,0,0,0.05)}.column-toggles { margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 4px; }
 .table-wrapper{overflow-x:auto;background:#fff;border-radius:16px;padding:12px;margin-top:20px}table{width:100%;border-collapse:collapse}th,td{padding:6px 4px;text-align:left;border-bottom:1px solid #eee;font-size:0.7rem}th{background:#f8f9fa; font-weight:600; vertical-align:bottom;}td strong{font-size:0.85rem}@media (max-width:640px){.metrics-grid{grid-template-columns:1fr} .table-wrapper table{font-size:0.65rem} th,td{padding:4px 2px}}
 </style></head>
 <body><div class="container"><div class="header">
@@ -627,6 +682,23 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
         <input type="date" name="date_from" value="<?= $date_from ?>">
         <input type="date" name="date_to" value="<?= $date_to ?>">
         <button type="submit">📅 Смотреть</button>
+    </form>
+    <form class="filter-form-inline" method="GET" action="team.php">
+        <?php if ($level != 'root') { echo '<input type="hidden" name="level" value="'.htmlspecialchars($level).'">'; } ?>
+        <?php if ($selected_id > 0) { echo '<input type="hidden" name="id" value="'.htmlspecialchars($selected_id).'">'; } ?>
+        <?php if (!empty($date_from)) { echo '<input type="hidden" name="date_from" value="'.htmlspecialchars($date_from).'">'; } ?>
+        <?php if (!empty($date_to)) { echo '<input type="hidden" name="date_to" value="'.htmlspecialchars($date_to).'">'; } ?>
+        <select name="key_type">
+            <option value="all" <?= $key_type == 'all' ? 'selected' : '' ?>>Все типы</option>
+            <option value="key" <?= $key_type == 'key' ? 'selected' : '' ?>>Ключевой</option>
+            <option value="nonkey" <?= $key_type == 'nonkey' ? 'selected' : '' ?>>Не ключевой</option>
+        </select>
+        <select name="pirate_type">
+            <option value="all" <?= $pirate_type == 'all' ? 'selected' : '' ?>>Все статусы</option>
+            <option value="pirate" <?= $pirate_type == 'pirate' ? 'selected' : '' ?>>Пират</option>
+            <option value="newreg" <?= $pirate_type == 'newreg' ? 'selected' : '' ?>>Новорег</option>
+        </select>
+        <button type="submit">🔍 Смотреть</button>
     </form>
 </div>
 </div>
@@ -675,7 +747,17 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
         <?php if (!empty($_GET['id'])) echo '<input type="hidden" name="id" value="'.htmlspecialchars($_GET['id']).'">'; ?>
         <input type="date" name="date_from" value="<?= $date_from ?>">
         <input type="date" name="date_to" value="<?= $date_to ?>">
-        <button type="submit">Показать</button>
+        <select name="key_type">
+            <option value="all" <?= $key_type == 'all' ? 'selected' : '' ?>>Все типы</option>
+            <option value="key" <?= $key_type == 'key' ? 'selected' : '' ?>>Ключевой</option>
+            <option value="nonkey" <?= $key_type == 'nonkey' ? 'selected' : '' ?>>Не ключевой</option>
+        </select>
+        <select name="pirate_type">
+            <option value="all" <?= $pirate_type == 'all' ? 'selected' : '' ?>>Все статусы</option>
+            <option value="pirate" <?= $pirate_type == 'pirate' ? 'selected' : '' ?>>Пират</option>
+            <option value="newreg" <?= $pirate_type == 'newreg' ? 'selected' : '' ?>>Новорег</option>
+        </select>
+        <button type="submit">🔍 Смотреть</button>
     </form>
     <div style="overflow-x:auto;">
         <table>

@@ -67,6 +67,21 @@ $competitive = [
     'Модульбанк' => 'Сбер — надёжность №1, АПМ без НДС 22%, бонусы СберСпасибо'
 ];
 
+// --- ПРОСРОЧЕННЫЕ ПЕРЕЗВОНЫ ---
+function getOverdueRecalls($pdo, $user_tabel) {
+    $stmt = $pdo->prepare("
+        SELECT task_id, status, next_call_date
+        FROM epk_tasks
+        WHERE user_tabel = ?
+          AND status IN ('Перезвон', 'Думает')
+          AND next_call_date IS NOT NULL
+          AND datetime(next_call_date) < datetime('now')
+    ");
+    $stmt->execute([$user_tabel]);
+    return $stmt->fetchAll();
+}
+$overdue = getOverdueRecalls($pdo, $tabel);
+
 ?>
 <!DOCTYPE html>
 <html lang="ru">
@@ -86,6 +101,9 @@ $competitive = [
         .stat { text-align:center; }
         .stat-value { font-size:1.5rem; font-weight:700; color:#1a73e8; }
         .stat-label { font-size:0.75rem; color:#5f6368; }
+        .overdue-banner { background:#fce8e6; padding:10px; border-radius:8px; margin-bottom:12px; border-left:4px solid #c5221f; flex-shrink:0; }
+        .overdue-banner a { color:#c5221f; font-weight:bold; text-decoration:none; }
+        .overdue-banner a:hover { text-decoration:underline; }
         .main { display:grid; grid-template-columns:320px 1fr; gap:12px; flex:1; min-height:0; }
         @media(max-width:900px){ .main { grid-template-columns:1fr; } }
         .panel { background:#fff; border-radius:12px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,0.1); overflow-y:auto; }
@@ -122,7 +140,6 @@ $competitive = [
             box-sizing:border-box;
             display:block;
         }
-        /* Все текстовые поля и select "Результат звонка" – на всю ширину */
         .smart-form input[type="text"],
         .smart-form input[type="number"],
         .smart-form textarea,
@@ -130,14 +147,12 @@ $competitive = [
         #callStatus {
             width:100% !important;
         }
-        /* Поле "Возражения" (select) и поля даты/времени – компактные */
         #objection,
         #nextCallDate,
         #nextCallTime {
             width:auto !important;
             display:inline-block;
         }
-        /* Для select "Возражения" и "Результат звонка" общий стиль, но "Результат" остаётся широким */
         #callStatus {
             width:100% !important;
         }
@@ -170,6 +185,7 @@ $competitive = [
         .empty-state { text-align:center; padding:40px; color:#80868b; }
         .form-section { margin-bottom:16px; }
         .form-section-title { font-size:0.8rem; font-weight:600; color:#5f6368; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px; }
+        .status-tip { font-size:0.7rem; color:#5f6368; margin-left:6px; }
     </style>
 </head>
 <body>
@@ -197,6 +213,20 @@ $competitive = [
             </div>
         </div>
     </div>
+
+    <!-- ПРОСРОЧЕННЫЕ ПЕРЕЗВОНЫ -->
+    <?php if (!empty($overdue)): ?>
+    <div class="overdue-banner">
+        <strong>⚠️ Просроченные перезвоны:</strong>
+        <?php foreach ($overdue as $task): ?>
+            <a href="#" onclick="selectTask('<?= htmlspecialchars($task['task_id']) ?>'); return false;">
+                ...<?= htmlspecialchars(substr($task['task_id'], -8)) ?>
+            </a>
+            (до <?= date('d.m.Y H:i', strtotime($task['next_call_date'])) ?>)
+        <?php endforeach; ?>
+        <span style="font-size:0.8rem; color:#c5221f;"> – срочно обработайте!</span>
+    </div>
+    <?php endif; ?>
 
     <div class="main">
         <!-- Левая колонка: список задач (прокручивается) -->
@@ -255,14 +285,21 @@ $competitive = [
                 <div class="form-section">
                     <div class="form-section-title">Результат звонка</div>
                     <select id="callStatus" onchange="onStatusChange()">
-                        <option value="think">Думает</option>
-                        <option value="signed">Согласен</option>
-                        <option value="reject">Отказ</option>
-                        <option value="noanswer">Недозвон</option>
-                        <option value="contract">Подписан договор</option>
-                        <option value="recall">Перезвон</option>
-                        <option value="nocontact">Нет контакта</option>
+                        <optgroup label="✅ Результативные (считаются в статистику)"> 
+                            <option value="signed" title="Клиент согласился">Согласен</option>
+                            <option value="contract" title="Подписан договор">Подписан договор</option>
+                            <option value="reject" title="Клиент отказал (требует подтверждения)">Отказ</option>
+                            <option value="think" title="Клиент думает, назначьте дату перезвона">Думает</option>
+                            <option value="recall" title="Назначен следующий контакт">Перезвон</option>
+                        </optgroup>
+                        <optgroup label="⏳ Попытки (не считаются в статистику)">
+                            <option value="noanswer" title="Не дозвонились">Недозвон</option>
+                            <option value="nocontact" title="Не удалось связаться">Нет контакта</option>
+                        </optgroup>
                     </select>
+                    <div style="font-size:0.7rem; color:#5f6368; margin-top:4px;">
+                        💡 Выберите статус. Статусы из группы «Результативные» считаются как отработанные задачи.
+                    </div>
                 </div>
 
                 <div id="smartFields" class="smart-form">
@@ -473,7 +510,6 @@ function assembleFullText(short = true) {
                 noanswer: 'Недозвон', contract: 'Договор'
             };
             const statusText = statusMap[h.call_result] || h.call_result;
-            // Для истории используем полные заголовки, т.к. они уже сохранены
             const historyComment = h.comment_text || '(без комментария)';
             fullText += '\n\n[' + h.created_at + '] ' + statusText + ':\n' + historyComment;
         });
@@ -546,7 +582,6 @@ function saveCall() {
             return;
         }
         if (d.success) {
-            // При сохранении тоже копируем сокращённый вариант (для удобства)
             const fullTextShort = assembleFullText(true);
             if (fullTextShort) {
                 navigator.clipboard.writeText(fullTextShort).then(() => {

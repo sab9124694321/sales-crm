@@ -1,8 +1,6 @@
 <?php
-// Увеличиваем время жизни сессии до 24 часов (86400 секунд)
+// Устанавливаем параметры сессии (24 часа) без её запуска
+// Запуск сессии будет выполнен в основном скрипте (например, session_start())
 session_set_cookie_params(86400);
 ini_set('session.gc_maxlifetime', 86400);
-// Стартуем сессию, если ещё не запущена
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+// НЕ вызываем session_start() здесь, чтобы избежать ошибки "already active"

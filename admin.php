@@ -17,6 +17,15 @@ if(isset($_GET['change_role']) && isset($_GET['new_role'])){
     exit;
 }
 
+// НОВОЕ: обработка смены начальника
+if(isset($_GET['change_manager']) && isset($_GET['new_manager_id'])){
+    $id = intval($_GET['change_manager']);
+    $new_manager_id = $_GET['new_manager_id'] ? intval($_GET['new_manager_id']) : null;
+    $pdo->prepare("UPDATE users SET manager_id=? WHERE id=?")->execute([$new_manager_id, $id]);
+    echo 'ok';
+    exit;
+}
+
 if(isset($_GET['delete'])){$r=$pdo->prepare("SELECT role FROM users WHERE id=?");$r->execute([$_GET['delete']]);if($r->fetchColumn()!='admin'){$pdo->prepare("DELETE FROM users WHERE id=?")->execute([$_GET['delete']]);}header("Location: admin.php?tab=employees");exit;}
 if(isset($_GET['move_user'])){if(isset($_GET['new_territory'])&&$_GET['new_territory']!=='')$pdo->prepare("UPDATE users SET territory_id=? WHERE id=?")->execute([$_GET['new_territory'],$_GET['move_user']]);header("Location: admin.php?tab=employees");exit;}
 if($_SERVER['REQUEST_METHOD']==='POST'&&isset($_POST['save_user'])){
@@ -160,6 +169,22 @@ function changeRole(userId, selectEl) {
     }
 }
 function moveUser(id,val){if(val)location.href='?move_user='+id+'&new_territory='+val;}
+
+// НОВОЕ: функция смены начальника
+function changeManager(userId, selectEl) {
+    let newManagerId = selectEl.value;
+    if(confirm('Изменить начальника?')) {
+        fetch('admin.php?change_manager='+userId+'&new_manager_id='+encodeURIComponent(newManagerId))
+        .then(r => r.text())
+        .then(res => {
+            if(res.trim() === 'ok') location.reload();
+            else alert('Ошибка при смене начальника');
+        });
+    } else {
+        // восстанавливаем предыдущее значение
+        selectEl.value = selectEl.getAttribute('data-old');
+    }
+}
 </script>
 </head><body>
 <div class="nav"><a href="dashboard.php" class="logo">🚀 SZB</a><a href="dashboard.php">Дашборд</a><a href="team.php">Команда</a><a href="admin.php" class="active">Админ</a><a href="admin_shop.php">🎁 Магазин</a><a href="support_settings.php">🆘 Поддержка</a><a href="logout.php" style="color:#e03131">Выйти</a></div>
@@ -181,7 +206,7 @@ function moveUser(id,val){if(val)location.href='?move_user='+id+'&new_territory=
 <select name="territory_id"><option value="">Без территории</option><?php foreach($territories as$t)echo"<option value='{$t['id']}'>".htmlspecialchars($t['name'])."</option>"; ?></select>
 <select name="is_active"><option value="1">Активен</option><option value="0">Уволен</option></select></div><button type="submit" class="btn" style="margin-top:10px">💾</button></form>
 <table>
-<th>Таб.№</th><th>ФИО</th><th>Роль</th><th>Территория</th><th>Статус</th><th></th>
+<th>Таб.№</th><th>ФИО</th><th>Роль</th><th>Начальник</th><th>Территория</th><th>Статус</th><th></th>
 <?php foreach($users as$u): ?>
 <tr>
 <td><?= $u['tabel_number'] ?></td>
@@ -196,6 +221,15 @@ function moveUser(id,val){if(val)location.href='?move_user='+id+'&new_territory=
         <?php endforeach; ?>
     </select>
 <?php endif; ?>
+</td>
+<!-- НОВОЕ: колонка с выбором начальника -->
+<td>
+    <select onchange="changeManager(<?= $u['id'] ?>, this)" data-old="<?= $u['manager_id'] ?? '' ?>">
+        <option value="">—</option>
+        <?php foreach($heads as $h): ?>
+            <option value="<?= $h['id'] ?>" <?= ($u['manager_id'] == $h['id']) ? 'selected' : '' ?>><?= htmlspecialchars($h['full_name']) ?></option>
+        <?php endforeach; ?>
+    </select>
 </td>
 <td><select onchange="moveUser(<?= $u['id'] ?>,this.value)"><option value=""><?= $u['tname']??'—' ?></option><?php foreach($territories as$t)echo"<option value='{$t['id']}'>".htmlspecialchars($t['name'])."</option>"; ?></select></td>
 <td><?= $u['is_active']?'✅':'❌' ?></td>

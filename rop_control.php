@@ -311,7 +311,7 @@ if ($is_head) {
     }
 }
 
-// --- CSV ВЫГРУЗКА ЗАДАЧ НА КОНТРОЛЕ ---
+// --- CSV ВЫГРУЗКА ЗАДАЧ НА КОНТРОЛЕ (ИСПРАВЛЕНА) ---
 if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 'terman')) {
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename=tasks_' . date('Y-m-d') . '.csv');
@@ -331,15 +331,19 @@ if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 
     ";
     $csv_params = [];
 
+    // Фильтр по статусу (если не "Все")
     if ($filter_status !== 'Все') {
-        $csv_sql .= " AND rcq.status = :status";
-        $csv_params[':status'] = $filter_status;
+        $csv_sql .= " AND rcq.status = ?";
+        $csv_params[] = $filter_status;
     }
-    $csv_sql .= " AND date(rcq.created_at) BETWEEN :date_from AND :date_to";
-    $csv_params[':date_from'] = $filter_date_from;
-    $csv_params[':date_to'] = $filter_date_to;
 
-    if ($is_head) {
+    // Фильтр по дате (всегда)
+    $csv_sql .= " AND date(rcq.created_at) BETWEEN ? AND ?";
+    $csv_params[] = $filter_date_from;
+    $csv_params[] = $filter_date_to;
+
+    // Ограничение по команде только для начальника (head), но не для admin
+    if ($is_head && $role !== 'admin') {
         $team_ids = array_column($employees, 'id');
         if (!empty($team_ids)) {
             $placeholders = implode(',', array_fill(0, count($team_ids), '?'));
@@ -350,9 +354,10 @@ if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 
         }
     }
 
+    // Фильтр по сотруднику для администратора
     if ($role === 'admin' && !empty($filter_employee_tabel)) {
-        $csv_sql .= " AND u.tabel_number = :employee_tabel";
-        $csv_params[':employee_tabel'] = $filter_employee_tabel;
+        $csv_sql .= " AND u.tabel_number = ?";
+        $csv_params[] = $filter_employee_tabel;
     }
 
     $csv_sql .= " ORDER BY rcq.created_at DESC";

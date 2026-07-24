@@ -95,14 +95,17 @@ if ($filter_by_products) {
     $params = array_merge($params, $products_selected);
 }
 
-// ДОБАВЛЕНО: условия для is_key
-if ($is_key_filter !== '') {
+// ДОБАВЛЕНО: условия для is_key (только если столбец существует)
+// Проверяем существование столбцов в таблице
+$cols = $pdo->query("PRAGMA table_info(inn_records)")->fetchAll(PDO::FETCH_COLUMN, 1);
+$hasKey = in_array('is_key', $cols);
+$hasStation = in_array('station_type', $cols);
+
+if ($hasKey && $is_key_filter !== '') {
     $where[] = "is_key = ?";
     $params[] = $is_key_filter === 'key' ? 1 : 0;
 }
-
-// ДОБАВЛЕНО: условия для station_type
-if ($station_type_filter !== '') {
+if ($hasStation && $station_type_filter !== '') {
     $where[] = "station_type = ?";
     $params[] = $station_type_filter;
 }
@@ -170,8 +173,8 @@ if (isset($_GET['download'])) {
     fwrite($out, "\xEF\xBB\xBF");
     fputcsv($out, ['ИНН', 'Продукт', 'Сотрудник', 'Руководитель', 'Дата', 'Ключевая', 'Тип станции'], ';', '"', "\\");
     foreach ($rows as $r) {
-        $is_key_label = $r['is_key'] ? 'Ключевая' : 'Неключевая';
-        $station_label = $r['station_type'] ?? '';
+        $is_key_label = isset($r['is_key']) ? ($r['is_key'] ? 'Ключевая' : 'Неключевая') : 'Н/Д';
+        $station_label = isset($r['station_type']) ? $r['station_type'] : '';
         fputcsv($out, [
             $r['inn'],
             $r['product'],
@@ -261,7 +264,8 @@ if (isset($_GET['download'])) {
                     <?php endforeach; ?>
                 </select>
             </div>
-            <!-- ДОБАВЛЕНО: фильтр по ключевости -->
+            <!-- ДОБАВЛЕНО: фильтр по ключевости (показываем только если столбец существует) -->
+            <?php if ($hasKey): ?>
             <div class="filter-group">
                 <label>Ключевая</label>
                 <select name="is_key">
@@ -270,7 +274,9 @@ if (isset($_GET['download'])) {
                     <option value="nonkey" <?= $is_key_filter === 'nonkey' ? 'selected' : '' ?>>Неключевая</option>
                 </select>
             </div>
-            <!-- ДОБАВЛЕНО: фильтр по типу станции -->
+            <?php endif; ?>
+            <!-- ДОБАВЛЕНО: фильтр по типу станции (показываем только если столбец существует) -->
+            <?php if ($hasStation): ?>
             <div class="filter-group">
                 <label>Тип станции</label>
                 <select name="station_type">
@@ -280,6 +286,7 @@ if (isset($_GET['download'])) {
                     <option value="newreg" <?= $station_type_filter === 'newreg' ? 'selected' : '' ?>>Новорег</option>
                 </select>
             </div>
+            <?php endif; ?>
             <div class="filter-group" style="flex:2;">
                 <label>Продукты</label>
                 <div class="chips-wrapper" id="chipsContainer"></div>
@@ -302,14 +309,14 @@ if (isset($_GET['download'])) {
                     <th>Сотрудник</th>
                     <th>Руководитель</th>
                     <th>Дата</th>
-                    <th>Ключевая</th>
-                    <th>Тип станции</th>
+                    <?php if ($hasKey): ?><th>Ключевая</th><?php endif; ?>
+                    <?php if ($hasStation): ?><th>Тип станции</th><?php endif; ?>
                     <?php if ($can_edit): ?><th>Действия</th><?php endif; ?>
                 </tr>
             </thead>
             <tbody>
             <?php if (empty($rows)): ?>
-                <tr><td colspan="8" style="text-align:center;color:#999;padding:24px;">Записей не найдено</td></tr>
+                <tr><td colspan="<?= 5 + ($hasKey?1:0) + ($hasStation?1:0) + ($can_edit?1:0) ?>" style="text-align:center;color:#999;padding:24px;">Записей не найдено</td></tr>
             <?php else: ?>
                 <?php foreach ($rows as $r): ?>
                 <tr>
@@ -318,8 +325,12 @@ if (isset($_GET['download'])) {
                     <td><?= htmlspecialchars($r['employee_name']) ?></td>
                     <td><?= htmlspecialchars($r['head_name'] ?? '—') ?></td>
                     <td><?= htmlspecialchars($r['sale_date']) ?></td>
-                    <td><?= $r['is_key'] ? 'Ключевая' : 'Неключевая' ?></td>
-                    <td><?= htmlspecialchars($r['station_type'] ?? '') ?></td>
+                    <?php if ($hasKey): ?>
+                    <td><?= isset($r['is_key']) ? ($r['is_key'] ? 'Ключевая' : 'Неключевая') : 'Н/Д' ?></td>
+                    <?php endif; ?>
+                    <?php if ($hasStation): ?>
+                    <td><?= isset($r['station_type']) ? htmlspecialchars($r['station_type']) : '' ?></td>
+                    <?php endif; ?>
                     <?php if ($can_edit): ?>
                     <td>
                         <button class="btn-edit" onclick="openEditModal(<?= $r['id'] ?>, '<?= htmlspecialchars($r['inn'], ENT_QUOTES) ?>', '<?= htmlspecialchars($r['product'], ENT_QUOTES) ?>', '<?= htmlspecialchars($r['sale_date'], ENT_QUOTES) ?>')">✏️</button>

@@ -74,6 +74,10 @@ if ($employee_tabel !== '' && !isset($employee_options[$employee_tabel])) {
     $employee_tabel = '';
 }
 
+// ДОБАВЛЕНО: фильтры по is_key и station_type
+$is_key_filter = $_GET['is_key'] ?? '';        // '', 'key', 'nonkey'
+$station_type_filter = $_GET['station_type'] ?? ''; // '', 'pirate', 'target', 'newreg'
+
 $where = [];
 $params = [];
 
@@ -89,6 +93,18 @@ if ($filter_by_products) {
     $placeholders = implode(',', array_fill(0, count($products_selected), '?'));
     $where[] = "product IN ($placeholders)";
     $params = array_merge($params, $products_selected);
+}
+
+// ДОБАВЛЕНО: условия для is_key
+if ($is_key_filter !== '') {
+    $where[] = "is_key = ?";
+    $params[] = $is_key_filter === 'key' ? 1 : 0;
+}
+
+// ДОБАВЛЕНО: условия для station_type
+if ($station_type_filter !== '') {
+    $where[] = "station_type = ?";
+    $params[] = $station_type_filter;
 }
 
 // Логика фильтра по сотруднику
@@ -121,13 +137,26 @@ $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $rows = $stmt->fetchAll();
 
-// Список всех продуктов (для чипсов)
-$products_list = $pdo->query("SELECT DISTINCT product FROM inn_records ORDER BY product")->fetchAll(PDO::FETCH_COLUMN);
-if (empty($products_list)) $products_list = ['ТЭ', 'Смарт', 'ПОС', 'Чаевые'];
+// ------------------------------------------------------------------
+// ЧИПСЫ: гарантируем, что список продуктов всегда не пуст
+// ------------------------------------------------------------------
+$products_from_db = $pdo->query("SELECT DISTINCT product FROM inn_records WHERE product IS NOT NULL AND product != '' ORDER BY product")->fetchAll(PDO::FETCH_COLUMN);
+// Если в БД нет продуктов – используем стандартный список
+if (empty($products_from_db)) {
+    $products_list = ['ТЭ', 'Смарт', 'ПОС', 'Чаевые'];
+} else {
+    $products_list = $products_from_db;
+}
+
 $all_products_json = json_encode($products_list);
 
-$initial_selected = $filter_by_products ? $products_selected : $products_list;
-$initial_selected_json = json_encode($initial_selected);
+// Если GET-параметр products не задан – выбираем все продукты
+if ($products_param === '') {
+    $selectedProducts = $products_list;
+} else {
+    $selectedProducts = $products_selected;
+}
+$initial_selected_json = json_encode($selectedProducts);
 
 // ------------------------------------------------------------------
 // Скачивание CSV
@@ -139,14 +168,18 @@ if (isset($_GET['download'])) {
     header('Content-Disposition: attachment; filename=inn_' . date('Y-m-d') . '.csv');
     $out = fopen('php://output', 'w');
     fwrite($out, "\xEF\xBB\xBF");
-    fputcsv($out, ['ИНН', 'Продукт', 'Сотрудник', 'Руководитель', 'Дата'], ';', '"', "\\");
+    fputcsv($out, ['ИНН', 'Продукт', 'Сотрудник', 'Руководитель', 'Дата', 'Ключевая', 'Тип станции'], ';', '"', "\\");
     foreach ($rows as $r) {
+        $is_key_label = $r['is_key'] ? 'Ключевая' : 'Неключевая';
+        $station_label = $r['station_type'] ?? '';
         fputcsv($out, [
             $r['inn'],
             $r['product'],
             $r['employee_name'],
             $r['head_name'] ?? '',
-            $r['sale_date']
+            $r['sale_date'],
+            $is_key_label,
+            $station_label
         ], ';', '"', "\\");
     }
     fclose($out);
@@ -228,6 +261,25 @@ if (isset($_GET['download'])) {
                     <?php endforeach; ?>
                 </select>
             </div>
+            <!-- ДОБАВЛЕНО: фильтр по ключевости -->
+            <div class="filter-group">
+                <label>Ключевая</label>
+                <select name="is_key">
+                    <option value="">Все</option>
+                    <option value="key" <?= $is_key_filter === 'key' ? 'selected' : '' ?>>Ключевая</option>
+                    <option value="nonkey" <?= $is_key_filter === 'nonkey' ? 'selected' : '' ?>>Неключевая</option>
+                </select>
+            </div>
+            <!-- ДОБАВЛЕНО: фильтр по типу станции -->
+            <div class="filter-group">
+                <label>Тип станции</label>
+                <select name="station_type">
+                    <option value="">Все</option>
+                    <option value="pirate" <?= $station_type_filter === 'pirate' ? 'selected' : '' ?>>Пиратская</option>
+                    <option value="target" <?= $station_type_filter === 'target' ? 'selected' : '' ?>>Целевой список</option>
+                    <option value="newreg" <?= $station_type_filter === 'newreg' ? 'selected' : '' ?>>Новорег</option>
+                </select>
+            </div>
             <div class="filter-group" style="flex:2;">
                 <label>Продукты</label>
                 <div class="chips-wrapper" id="chipsContainer"></div>
@@ -244,11 +296,20 @@ if (isset($_GET['download'])) {
     <div class="card" style="overflow-x:auto;">
         <table>
             <thead>
-                <tr><th>ИНН</th><th>Продукт</th><th>Сотрудник</th><th>Руководитель</th><th>Дата</th><?php if ($can_edit): ?><th>Действия</th><?php endif; ?></tr>
+                <tr>
+                    <th>ИНН</th>
+                    <th>Продукт</th>
+                    <th>Сотрудник</th>
+                    <th>Руководитель</th>
+                    <th>Дата</th>
+                    <th>Ключевая</th>
+                    <th>Тип станции</th>
+                    <?php if ($can_edit): ?><th>Действия</th><?php endif; ?>
+                </tr>
             </thead>
             <tbody>
             <?php if (empty($rows)): ?>
-                <tr><td colspan="6" style="text-align:center;color:#999;padding:24px;">Записей не найдено</td></tr>
+                <tr><td colspan="8" style="text-align:center;color:#999;padding:24px;">Записей не найдено</td></tr>
             <?php else: ?>
                 <?php foreach ($rows as $r): ?>
                 <tr>
@@ -257,6 +318,8 @@ if (isset($_GET['download'])) {
                     <td><?= htmlspecialchars($r['employee_name']) ?></td>
                     <td><?= htmlspecialchars($r['head_name'] ?? '—') ?></td>
                     <td><?= htmlspecialchars($r['sale_date']) ?></td>
+                    <td><?= $r['is_key'] ? 'Ключевая' : 'Неключевая' ?></td>
+                    <td><?= htmlspecialchars($r['station_type'] ?? '') ?></td>
                     <?php if ($can_edit): ?>
                     <td>
                         <button class="btn-edit" onclick="openEditModal(<?= $r['id'] ?>, '<?= htmlspecialchars($r['inn'], ENT_QUOTES) ?>', '<?= htmlspecialchars($r['product'], ENT_QUOTES) ?>', '<?= htmlspecialchars($r['sale_date'], ENT_QUOTES) ?>')">✏️</button>
@@ -272,13 +335,18 @@ if (isset($_GET['download'])) {
 </div>
 
 <?php if ($can_edit): ?>
+<!-- Модальное окно редактирования (только для админов/руководителей) -->
 <div id="editModal" class="modal">
     <div class="modal-content">
         <h3>✏️ Редактировать запись</h3>
         <form method="POST">
             <input type="hidden" name="edit_id" id="edit_id">
             <div class="form-group"><label>ИНН</label><input type="text" name="inn" id="edit_inn" required pattern="\d{10,12}" maxlength="12"></div>
-            <div class="form-group"><label>Продукт</label><select name="product" id="edit_product" required><?php foreach ($products_list as $prod): ?><option value="<?= htmlspecialchars($prod) ?>"><?= htmlspecialchars($prod) ?></option><?php endforeach; ?></select></div>
+            <div class="form-group"><label>Продукт</label><select name="product" id="edit_product" required>
+                <?php foreach ($products_list as $prod): ?>
+                    <option value="<?= htmlspecialchars($prod) ?>"><?= htmlspecialchars($prod) ?></option>
+                <?php endforeach; ?>
+            </select></div>
             <div class="form-group"><label>Дата</label><input type="date" name="sale_date" id="edit_date" required></div>
             <div style="display:flex; gap:10px; margin-top:15px;">
                 <button type="submit" class="btn">💾 Сохранить</button>
@@ -289,15 +357,42 @@ if (isset($_GET['download'])) {
 </div>
 
 <script>
+// Функции редактирования (только для тех, у кого есть права)
+function openEditModal(id, inn, product, date) {
+    document.getElementById('edit_id').value = id;
+    document.getElementById('edit_inn').value = inn;
+    document.getElementById('edit_product').value = product;
+    document.getElementById('edit_date').value = date;
+    document.getElementById('editModal').style.display = 'block';
+}
+function closeEditModal() { document.getElementById('editModal').style.display = 'none'; }
+window.onclick = function(e) { if (e.target === document.getElementById('editModal')) closeEditModal(); }
+</script>
+<?php endif; ?>
+
+<!-- ========== СКРИПТ ДЛЯ ЧИПСОВ (вынесен наружу, работает для всех) ========== -->
+<script>
+// ----- ОТЛАДКА: вывод данных в консоль -----
+console.log('🔍 ALL_PRODUCTS из PHP:', <?= $all_products_json ?>);
+console.log('🔍 selectedProducts из PHP:', <?= $initial_selected_json ?>);
+
+// ----- ЧИПСЫ -----
 const ALL_PRODUCTS = <?= $all_products_json ?>;
 let selectedProducts = <?= $initial_selected_json ?>;
 
 const chipsContainer = document.getElementById('chipsContainer');
 const productsInput = document.getElementById('productsInput');
 
+console.log('📦 chipsContainer:', chipsContainer);
+console.log('📦 productsInput:', productsInput);
+
 function renderChips() {
+    if (!chipsContainer) {
+        console.error('❌ chipsContainer не найден!');
+        return;
+    }
     chipsContainer.innerHTML = '';
-    if (selectedProducts.length === 0) {
+    if (!selectedProducts || selectedProducts.length === 0) {
         chipsContainer.innerHTML = '<span class="chips-placeholder">Ничего не выбрано</span>';
         return;
     }
@@ -310,6 +405,7 @@ function renderChips() {
 }
 
 function updateInput() {
+    if (!productsInput) return;
     if (selectedProducts.length === ALL_PRODUCTS.length && ALL_PRODUCTS.every(p => selectedProducts.includes(p))) {
         productsInput.value = '';
     } else {
@@ -326,21 +422,12 @@ chipsContainer.addEventListener('click', function(e) {
     updateInput();
 });
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('✅ DOM загружен, вызываем renderChips()');
     renderChips();
     updateInput();
 });
-
-function openEditModal(id, inn, product, date) {
-    document.getElementById('edit_id').value = id;
-    document.getElementById('edit_inn').value = inn;
-    document.getElementById('edit_product').value = product;
-    document.getElementById('edit_date').value = date;
-    document.getElementById('editModal').style.display = 'block';
-}
-function closeEditModal() { document.getElementById('editModal').style.display = 'none'; }
-window.onclick = function(e) { if (e.target === document.getElementById('editModal')) closeEditModal(); }
 </script>
-<?php endif; ?>
+
 </body>
 </html>

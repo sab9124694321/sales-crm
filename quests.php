@@ -6,9 +6,16 @@ require_once 'db.php';
 $role = $_SESSION['role'];
 $tabel = $_SESSION['tabel'];
 $user_id = $_SESSION['user_id'];
-$is_head = in_array($role, ['admin', 'head', 'territory_head']);
+$is_head = in_array($role, ['admin', 'head', 'territory_head', 'mmb_tp_head']);
 
 $message = '';
+
+// ---------- Проверка и добавление колонки delegated_to в quest_takers ----------
+try {
+    $pdo->exec("ALTER TABLE quest_takers ADD COLUMN delegated_to TEXT");
+} catch (PDOException $e) {
+    // колонка уже существует
+}
 
 // ---------- Обработка действий ----------
 
@@ -41,7 +48,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_quest']) && $is_
         // Назначение сотрудников
         if (!empty($assign_tabels)) {
             $insert_taker = $pdo->prepare("INSERT OR IGNORE INTO quest_takers (quest_id, employee_tabel, status) VALUES (?, ?, ?)");
-            // Для индивидуальных без поручения – статус pending, иначе taken
             $status = ($type == 'individual' && !$mandatory) ? 'pending' : 'taken';
             foreach ($assign_tabels as $emp_tabel) {
                 $insert_taker->execute([$quest_id, trim($emp_tabel), $status]);
@@ -61,7 +67,6 @@ if (isset($_GET['take']) && $role === 'manager') {
     if ($chk->fetch()) {
         $stmt = $pdo->prepare("UPDATE quest_takers SET status = 'taken', taken_at = datetime('now') WHERE quest_id = ? AND employee_tabel = ? AND status = 'pending'");
         $stmt->execute([$qid, $tabel]);
-        // Если записи не было (групповой квест), то создаём
         if ($stmt->rowCount() == 0) {
             $pdo->prepare("INSERT OR IGNORE INTO quest_takers (quest_id, employee_tabel, status) VALUES (?, ?, 'taken')")
                ->execute([$qid, $tabel]);
@@ -143,11 +148,52 @@ if (isset($_GET['close']) && $is_head) {
 // 7. Удаление квеста (руководитель)
 if (isset($_GET['delete_quest']) && $is_head) {
     $qid = (int)$_GET['delete_quest'];
-    // Удаляем связанные записи quest_takers и сам квест
     $pdo->prepare("DELETE FROM quest_takers WHERE quest_id = ?")->execute([$qid]);
     $pdo->prepare("DELETE FROM quests WHERE id = ? AND head_tabel = ?")->execute([$qid, $tabel]);
     header("Location: quests.php?tab=overview");
     exit;
+}
+
+// 8. Делегирование квеста начальником подчинённому
+if (isset($_GET['delegate']) && $is_head) {
+    $taker_id = (int)$_GET['delegate'];
+    // Проверяем, что запись принадлежит текущему пользователю
+    $stmt = $pdo->prepare("SELECT * FROM quest_takers WHERE id = ? AND employee_tabel = ? AND status = 'taken'");
+    $stmt->execute([$taker_id, $tabel]);
+    $taker = $stmt->fetch();
+    if ($taker) {
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delegate_to'])) {
+            $delegate_to = $_POST['delegate_to'];
+            // Проверяем, что сотрудник является подчинённым
+            $sub = $pdo->prepare("SELECT id FROM users WHERE tabel_number = ? AND manager_id = (SELECT id FROM users WHERE tabel_number = ?) AND is_active = 1");
+            $sub->execute([$delegate_to, $tabel]);
+            if ($sub->fetch()) {
+                // Создаём новую запись для подчинённого
+                $insert = $pdo->prepare("INSERT INTO quest_takers (quest_id, employee_tabel, status, taken_at) VALUES (?, ?, 'taken', datetime('now'))");
+                $insert->execute([$taker['quest_id'], $delegate_to]);
+                // Помечаем текущую как делегированную
+                $update = $pdo->prepare("UPDATE quest_takers SET status = 'delegated', delegated_to = ? WHERE id = ?");
+                $update->execute([$delegate_to, $taker_id]);
+                $message = '<div class="success">✅ Квест делегирован сотруднику ' . htmlspecialchars($delegate_to) . '</div>';
+                header("Location: quests.php?tab=overview");
+                exit;
+            } else {
+                $message = '<div class="error">❌ Выбранный сотрудник не является вашим подчинённым</div>';
+            }
+        }
+        // Показываем форму выбора подчинённого
+        // Получаем список подчинённых
+        $subordinates = $pdo->prepare("SELECT tabel_number, full_name FROM users WHERE manager_id = (SELECT id FROM users WHERE tabel_number = ?) AND is_active = 1 ORDER BY full_name");
+        $subordinates->execute([$tabel]);
+        $subs = $subordinates->fetchAll();
+        if (empty($subs)) {
+            $message = '<div class="error">❌ У вас нет подчинённых для делегирования</div>';
+            header("Location: quests.php?tab=overview");
+            exit;
+        }
+        // Выводим форму делегирования
+        $delegate_form = true;
+    }
 }
 
 // ---------- Данные для отображения ----------
@@ -181,8 +227,8 @@ if ($is_head) {
 
 // ДОСТУПНЫЕ КВЕСТЫ: групповые + индивидуальные со статусом pending
 $available_quests = [];
-if ($role === 'manager') {
-    // Групповые, которые менеджер ещё не принял
+if ($role === 'manager' || $is_head) {
+    // Для начальников тоже показываем доступные квесты (которые назначены им как исполнителям)
     $stmt = $pdo->prepare("SELECT q.* FROM quests q
         WHERE q.is_active = 1
         AND q.type = 'group'
@@ -191,7 +237,6 @@ if ($role === 'manager') {
     $stmt->execute([$tabel]);
     $group_quests = $stmt->fetchAll();
 
-    // Индивидуальные со статусом pending
     $stmt = $pdo->prepare("SELECT q.* FROM quests q
         JOIN quest_takers qt ON q.id = qt.quest_id
         WHERE q.is_active = 1
@@ -204,14 +249,14 @@ if ($role === 'manager') {
     $available_quests = array_merge($group_quests, $pending_individual);
 }
 
-// МОИ КВЕСТЫ (принятые)
+// МОИ КВЕСТЫ (принятые) – для менеджеров и начальников (как исполнителей)
 $my_quests = [];
-if ($role === 'manager') {
-    $stmt = $pdo->prepare("SELECT q.*, qt.status, qt.completed_at, qt.taken_at, qt.report
+if ($role === 'manager' || $is_head) {
+    $stmt = $pdo->prepare("SELECT q.*, qt.status, qt.completed_at, qt.taken_at, qt.report, qt.id as taker_id, qt.delegated_to
         FROM quests q
         JOIN quest_takers qt ON q.id = qt.quest_id
         WHERE qt.employee_tabel = ?
-        AND qt.status NOT IN ('pending','closed')
+        AND qt.status NOT IN ('pending','closed','delegated')
         ORDER BY q.ends_at ASC");
     $stmt->execute([$tabel]);
     $my_quests = $stmt->fetchAll();
@@ -221,9 +266,23 @@ $filter_date_from = $_GET['date_from'] ?? '';
 $filter_date_to = $_GET['date_to'] ?? '';
 $filter_overdue = isset($_GET['overdue']) ? true : false;
 
-$all_managers = [];
+// ---- Доступные сотрудники для назначения (в зависимости от роли) ----
+$available_employees = [];
 if ($is_head) {
-    $all_managers = $pdo->query("SELECT full_name, tabel_number FROM users WHERE role='manager' AND is_active=1 ORDER BY full_name")->fetchAll();
+    // Начальник – его подчинённые
+    $stmt = $pdo->prepare("SELECT full_name, tabel_number FROM users WHERE manager_id = (SELECT id FROM users WHERE tabel_number = ?) AND is_active = 1 ORDER BY full_name");
+    $stmt->execute([$tabel]);
+    $available_employees = $stmt->fetchAll();
+} elseif ($role === 'terman') {
+    // Термен – все начальники
+    $stmt = $pdo->prepare("SELECT full_name, tabel_number FROM users WHERE role IN ('head', 'mmb_tp_head', 'territory_head') AND is_active = 1 ORDER BY full_name");
+    $stmt->execute();
+    $available_employees = $stmt->fetchAll();
+} elseif ($role === 'admin') {
+    $stmt = $pdo->query("SELECT full_name, tabel_number FROM users WHERE is_active = 1 ORDER BY full_name");
+    $available_employees = $stmt->fetchAll();
+} else {
+    $available_employees = []; // для менеджеров – нет доступных для назначения
 }
 ?>
 <!DOCTYPE html>
@@ -240,7 +299,6 @@ if ($is_head) {
         .nav .logo { font-size:20px; font-weight:700; color:#fff; margin-right:auto; }
         .nav .user { margin-left:auto; color:#aaa; font-size:13px; }
         .nav a.logout { color:#e03131; }
-
         .container { max-width:1400px; margin:0 auto; padding:24px; }
         .card { background:#fff; border-radius:16px; padding:20px; margin-bottom:16px; box-shadow:0 2px 12px rgba(0,0,0,0.04); border:1px solid #e8ecf1; }
         .grid2 { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px; }
@@ -296,6 +354,7 @@ if ($is_head) {
         tr.overdue { background-color: #fff0f0; }
         tr.completed { background-color: #f0fff0; }
         .quest-actions { margin-top: 8px; display: flex; gap: 8px; }
+        .delegate-form { margin: 10px 0; padding: 10px; background: #f8f9fa; border-radius: 10px; }
     </style>
 </head>
 <body>
@@ -317,6 +376,25 @@ if ($is_head) {
 
     <?php if ($is_head): ?>
         <h2>🎯 Управление квестами</h2>
+
+        <?php if (isset($delegate_form) && $delegate_form): ?>
+            <!-- Форма делегирования -->
+            <div class="card">
+                <h3>👥 Делегировать квест</h3>
+                <form method="post" class="delegate-form">
+                    <input type="hidden" name="delegate_to" id="delegate_to" value="">
+                    <p>Выберите подчинённого для делегирования:</p>
+                    <select name="delegate_to" required>
+                        <option value="">-- Выберите --</option>
+                        <?php foreach ($subs as $s): ?>
+                            <option value="<?= htmlspecialchars($s['tabel_number']) ?>"><?= htmlspecialchars($s['full_name']) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <button type="submit" class="btn btn-sm">✅ Делегировать</button>
+                    <a href="quests.php?tab=overview" class="btn btn-sm">Отмена</a>
+                </form>
+            </div>
+        <?php endif; ?>
 
         <div class="tabs">
             <a href="?tab=overview" class="btn btn-sm <?= $selected_tab=='overview'?'active':'' ?>">Обзор</a>
@@ -370,8 +448,11 @@ if ($is_head) {
                                             <a href="?confirm=<?= $taker['id'] ?>&tab=overview" class="btn btn-sm">✅ Подтвердить</a>
                                         <?php elseif ($taker['status'] == 'failed'): ?>
                                             <a href="?close=<?= $taker['id'] ?>&tab=overview" class="btn btn-sm btn-danger">🚫 Закрыть без исполнения</a>
-                                        <?php elseif ($is_overdue && !in_array($taker['status'], ['rewarded','failed','closed'])): ?>
+                                        <?php elseif ($is_overdue && !in_array($taker['status'], ['rewarded','failed','closed','delegated'])): ?>
                                             <a href="?penalize=<?= $taker['id'] ?>&tab=overview" class="btn btn-sm btn-danger">⚠️ Штраф</a>
+                                        <?php endif; ?>
+                                        <?php if ($taker['status'] == 'taken' && $taker['employee_tabel'] == $tabel): ?>
+                                            <a href="?delegate=<?= $taker['id'] ?>&tab=overview" class="btn btn-sm">📤 Делегировать</a>
                                         <?php endif; ?>
                                     </td>
                                 </tr>
@@ -387,7 +468,6 @@ if ($is_head) {
 
         <?php elseif ($selected_tab == 'create'): ?>
             <?php
-            // Если передан параметр edit, загружаем квест для редактирования
             $edit_mode = false;
             $edit_quest = null;
             if (isset($_GET['edit']) && $is_head) {
@@ -396,7 +476,6 @@ if ($is_head) {
                 $edit_quest = $stmt->fetch();
                 if ($edit_quest) {
                     $edit_mode = true;
-                    // Загружаем уже назначенных сотрудников
                     $stmt_takers = $pdo->prepare("SELECT employee_tabel FROM quest_takers WHERE quest_id = ?");
                     $stmt_takers->execute([$edit_quest['id']]);
                     $assigned_tabels = $stmt_takers->fetchAll(PDO::FETCH_COLUMN);
@@ -441,19 +520,25 @@ if ($is_head) {
                     <div class="form-group">
                         <label>Назначить сотрудников</label>
                         <div class="employee-checkboxes" id="employeeList">
-                            <?php foreach ($all_managers as $m): 
-                                $checked = $edit_mode && in_array($m['tabel_number'], $assigned_tabels ?? []);
-                            ?>
-                                <label>
-                                    <input type="checkbox" name="assign_to[]" value="<?= htmlspecialchars($m['tabel_number']) ?>" <?= $checked ? 'checked' : '' ?>>
-                                    <?= htmlspecialchars($m['full_name']) ?> (<?= htmlspecialchars($m['tabel_number']) ?>)
-                                </label>
-                            <?php endforeach; ?>
+                            <?php if (empty($available_employees)): ?>
+                                <p style="color:#999;">Нет доступных сотрудников для назначения.</p>
+                            <?php else: ?>
+                                <?php foreach ($available_employees as $emp): 
+                                    $checked = $edit_mode && in_array($emp['tabel_number'], $assigned_tabels ?? []);
+                                ?>
+                                    <label>
+                                        <input type="checkbox" name="assign_to[]" value="<?= htmlspecialchars($emp['tabel_number']) ?>" <?= $checked ? 'checked' : '' ?>>
+                                        <?= htmlspecialchars($emp['full_name']) ?> (<?= htmlspecialchars($emp['tabel_number']) ?>)
+                                    </label>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
                         </div>
-                        <div style="margin-top:6px;">
-                            <button type="button" class="btn btn-sm select-all-btn" onclick="checkAllEmployees()">Выбрать всех</button>
-                            <button type="button" class="btn btn-sm select-all-btn" onclick="uncheckAllEmployees()">Снять выделение</button>
-                        </div>
+                        <?php if (!empty($available_employees)): ?>
+                            <div style="margin-top:6px;">
+                                <button type="button" class="btn btn-sm select-all-btn" onclick="checkAllEmployees()">Выбрать всех</button>
+                                <button type="button" class="btn btn-sm select-all-btn" onclick="uncheckAllEmployees()">Снять выделение</button>
+                            </div>
+                        <?php endif; ?>
                         <div class="form-group" style="margin-top:10px;">
                             <label>Или введите табельные номера через запятую</label>
                             <input type="text" name="assign_to_text" placeholder="123,456,789">
@@ -489,7 +574,7 @@ if ($is_head) {
                 <p>Нет новых квестов.</p>
             <?php else: ?>
                 <?php foreach ($available_quests as $q): 
-                    $is_pending = ($q['type'] == 'individual'); // pending индивидуальные
+                    $is_pending = ($q['type'] == 'individual');
                 ?>
                     <div class="quest-card card <?= !empty($q['mandatory']) ? 'mandatory' : '' ?>" style="margin-bottom:10px;">
                         <div style="display:flex; justify-content:space-between;">
@@ -524,7 +609,7 @@ if ($is_head) {
                         <th>Действия</th>
                     </tr>
                     <?php foreach ($my_quests as $mq): 
-                        $is_overdue = !empty($mq['ends_at']) && strtotime($mq['ends_at']) < time() && !in_array($mq['status'], ['rewarded','failed','closed']);
+                        $is_overdue = !empty($mq['ends_at']) && strtotime($mq['ends_at']) < time() && !in_array($mq['status'], ['rewarded','failed','closed','delegated']);
                         $is_completed = in_array($mq['status'], ['completed', 'rewarded']);
                     ?>
                         <tr class="<?= $is_overdue ? 'overdue' : '' ?><?= $is_completed ? 'completed' : '' ?>">
@@ -552,6 +637,8 @@ if ($is_head) {
                 </table>
             <?php endif; ?>
         </div>
+
+        <!-- Для начальников (в том числе и manager? но manager отдельно выше) -->
     <?php endif; ?>
 </div>
 

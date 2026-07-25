@@ -38,47 +38,82 @@ function getCallPlan($pdo, $tabel_num) {
     return ceil($month_plan / $work_days);
 }
 
-// --- Функция получения статистики сотрудника (расширенная) ---
+// ======================================================
+// ИЗМЕНЕНО: функция getEmployeeStats считает по задачам
+// ======================================================
 function getEmployeeStats($pdo, $emp_id, $emp_tabel, $date_from, $date_to) {
     $daily_plan = getCallPlan($pdo, $emp_tabel);
 
+    // План на месяц
     $stmt = $pdo->prepare("SELECT calls_plan FROM plans WHERE tabel_number = ? AND period = strftime('%Y-%m', 'now')");
     $stmt->execute([$emp_tabel]);
     $month_plan = $stmt->fetchColumn() ?: 350;
 
+    // 1. Общее количество задач в epk_tasks (за весь период — без фильтра по дате, т.к. задачи не имеют даты выполнения)
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM epk_tasks WHERE user_tabel = ?");
     $stmt->execute([$emp_tabel]);
     $total_tasks = (int)$stmt->fetchColumn();
 
-    $stmt = $pdo->prepare("SELECT COALESCE(SUM(calls),0) FROM daily_reports WHERE user_id = ? AND report_date BETWEEN ? AND ?");
+    // 2. Количество задач с хотя бы одним звонком за период (Факт месяца отработ.)
+    $stmt = $pdo->prepare("
+        SELECT COUNT(DISTINCT task_id) 
+        FROM call_comments 
+        WHERE user_id = ? AND date(created_at) BETWEEN ? AND ?
+    ");
     $stmt->execute([$emp_id, $date_from, $date_to]);
-    $calls_done_period = (int)$stmt->fetchColumn();
+    $effective_calls = (int)$stmt->fetchColumn();
 
+    // 3. Последний статус по каждой задаче за период
+    $stmt = $pdo->prepare("
+        SELECT 
+            COUNT(CASE WHEN last_result = 'contract' THEN 1 END) as contract_count,
+            COUNT(CASE WHEN last_result = 'signed' THEN 1 END) as signed_count,
+            COUNT(CASE WHEN last_result = 'reject' THEN 1 END) as rejects,
+            COUNT(CASE WHEN last_result = 'think' THEN 1 END) as thinks,
+            COUNT(CASE WHEN last_result = 'noanswer' THEN 1 END) as noanswers,
+            COUNT(CASE WHEN last_result = 'nocontact' THEN 1 END) as nocontact_count,
+            COUNT(CASE WHEN last_result = 'recall' THEN 1 END) as recall_count
+        FROM (
+            SELECT 
+                cc.task_id,
+                cc.call_result as last_result
+            FROM call_comments cc
+            INNER JOIN (
+                SELECT task_id, MAX(created_at) as max_created
+                FROM call_comments
+                WHERE user_id = ? AND date(created_at) BETWEEN ? AND ?
+                GROUP BY task_id
+            ) latest ON cc.task_id = latest.task_id AND cc.created_at = latest.max_created
+            WHERE cc.user_id = ?
+        ) last_results
+    ");
+    $stmt->execute([$emp_id, $date_from, $date_to, $emp_id]);
+    $call_stats = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    // 4. Количество уникальных задач на контроле со статусом 'На проверке' (исправлено)
+    $stmt = $pdo->prepare("
+        SELECT COUNT(DISTINCT task_id) 
+        FROM rop_control_queue 
+        WHERE user_id = ? 
+          AND status = 'На проверке' 
+          AND date(created_at) BETWEEN ? AND ?
+    ");
+    $stmt->execute([$emp_id, $date_from, $date_to]);
+    $on_control = (int)$stmt->fetchColumn();
+
+    // 5. Количество звонков за сегодня (для Факт дня)
     $today = date('Y-m-d');
     $stmt = $pdo->prepare("SELECT COALESCE(SUM(calls),0) FROM daily_reports WHERE user_id = ? AND report_date = ?");
     $stmt->execute([$emp_id, $today]);
     $calls_done_today = (int)$stmt->fetchColumn();
 
-    $stmt = $pdo->prepare("
-        SELECT 
-            COUNT(*) as total_call_comments,
-            SUM(CASE WHEN call_result NOT IN ('noanswer', 'nocontact') THEN 1 ELSE 0 END) as effective_calls,
-            SUM(CASE WHEN call_result = 'contract' THEN 1 ELSE 0 END) as contract_count,
-            SUM(CASE WHEN call_result = 'signed' THEN 1 ELSE 0 END) as signed_count,
-            SUM(CASE WHEN call_result = 'reject' THEN 1 ELSE 0 END) as rejects,
-            SUM(CASE WHEN call_result = 'think' THEN 1 ELSE 0 END) as thinks,
-            SUM(CASE WHEN call_result = 'noanswer' THEN 1 ELSE 0 END) as noanswers,
-            SUM(CASE WHEN call_result = 'nocontact' THEN 1 ELSE 0 END) as nocontact_count,
-            SUM(CASE WHEN call_result = 'recall' THEN 1 ELSE 0 END) as recall_count
-        FROM call_comments 
-        WHERE user_id = ? AND date(created_at) BETWEEN ? AND ?
-    ");
+    // 6. Количество выполненных звонков за период (из daily_reports) для Факт месяца (отчёты)
+    $stmt = $pdo->prepare("SELECT COALESCE(SUM(calls),0) FROM daily_reports WHERE user_id = ? AND report_date BETWEEN ? AND ?");
     $stmt->execute([$emp_id, $date_from, $date_to]);
-    $call_stats = $stmt->fetch(PDO::FETCH_ASSOC);
+    $calls_done_period = (int)$stmt->fetchColumn();
 
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM rop_control_queue WHERE user_id = ? AND date(created_at) BETWEEN ? AND ?");
-    $stmt->execute([$emp_id, $date_from, $date_to]);
-    $on_control = (int)$stmt->fetchColumn();
+    // 7. Общее количество продаж = contract + signed (по задачам, уже посчитано)
+    $total_sales = (int)($call_stats['contract_count'] ?? 0) + (int)($call_stats['signed_count'] ?? 0);
 
     return [
         'daily_plan' => $daily_plan,
@@ -86,16 +121,16 @@ function getEmployeeStats($pdo, $emp_id, $emp_tabel, $date_from, $date_to) {
         'calls_done_period' => $calls_done_period,
         'month_plan' => $month_plan,
         'total_tasks' => $total_tasks,
-        'effective_calls' => (int)($call_stats['effective_calls'] ?? 0),
+        'effective_calls' => $effective_calls,   // количество задач с результатом
         'contract_count' => (int)($call_stats['contract_count'] ?? 0),
-        'signed_count' => (int)($call_stats['signed_count'] ?? 0),
-        'total_sales' => (int)($call_stats['contract_count'] ?? 0) + (int)($call_stats['signed_count'] ?? 0),
-        'rejects' => (int)($call_stats['rejects'] ?? 0),
-        'thinks' => (int)($call_stats['thinks'] ?? 0),
-        'noanswers' => (int)($call_stats['noanswers'] ?? 0),
-        'nocontact_count' => (int)($call_stats['nocontact_count'] ?? 0),
-        'recall_count' => (int)($call_stats['recall_count'] ?? 0),
-        'on_control' => $on_control
+        'signed_count'   => (int)($call_stats['signed_count'] ?? 0),
+        'total_sales'    => $total_sales,
+        'rejects'        => (int)($call_stats['rejects'] ?? 0),
+        'thinks'         => (int)($call_stats['thinks'] ?? 0),
+        'noanswers'      => (int)($call_stats['noanswers'] ?? 0),
+        'nocontact_count'=> (int)($call_stats['nocontact_count'] ?? 0),
+        'recall_count'   => (int)($call_stats['recall_count'] ?? 0),
+        'on_control'     => $on_control
     ];
 }
 
@@ -311,7 +346,7 @@ if ($is_head) {
     }
 }
 
-// --- CSV ВЫГРУЗКА ЗАДАЧ НА КОНТРОЛЕ (ИСПРАВЛЕНА) ---
+// --- CSV ВЫГРУЗКА (без изменений) ---
 if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 'terman')) {
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename=tasks_' . date('Y-m-d') . '.csv');
@@ -331,18 +366,14 @@ if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 
     ";
     $csv_params = [];
 
-    // Фильтр по статусу (если не "Все")
     if ($filter_status !== 'Все') {
         $csv_sql .= " AND rcq.status = ?";
         $csv_params[] = $filter_status;
     }
-
-    // Фильтр по дате (всегда)
     $csv_sql .= " AND date(rcq.created_at) BETWEEN ? AND ?";
     $csv_params[] = $filter_date_from;
     $csv_params[] = $filter_date_to;
 
-    // Ограничение по команде только для начальника (head), но не для admin
     if ($is_head && $role !== 'admin') {
         $team_ids = array_column($employees, 'id');
         if (!empty($team_ids)) {
@@ -354,7 +385,6 @@ if (isset($_GET['export_tasks']) && ($is_head || $role === 'admin' || $role === 
         }
     }
 
-    // Фильтр по сотруднику для администратора
     if ($role === 'admin' && !empty($filter_employee_tabel)) {
         $csv_sql .= " AND u.tabel_number = ?";
         $csv_params[] = $filter_employee_tabel;
@@ -596,7 +626,6 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
         .badge-noanswer { background:#f3e8fd; color:#9334e6; }
         .rop-comment { background:#f1f3f4; padding:6px; border-radius:6px; margin-top:4px; }
 
-        /* Вертикальные заголовки с поворотом на 180 градусов */
         th.rotate {
             height: auto;
             min-height: 80px;
@@ -673,7 +702,7 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
     </div>
 
     <?php
-    // --- Статистика с вертикальными заголовками (кроме "Сотрудник") ---
+    // --- Статистика с вертикальными заголовками ---
     $statisticsHtml = '';
     ob_start();
     ?>
@@ -831,7 +860,6 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
     $statisticsHtml = ob_get_clean();
     ?>
 
-    <!-- Статистика (все, кроме термена) -->
     <?php if (!$is_terman) echo $statisticsHtml; ?>
 
     <?php if ($is_head || $role === 'admin'): ?>
@@ -1002,7 +1030,6 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
         <?php endforeach; ?>
     </div>
 
-    <!-- Для термена показываем статистику внизу -->
     <?php echo $statisticsHtml; ?>
     <?php endif; ?>
 </div>

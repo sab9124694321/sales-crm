@@ -20,14 +20,12 @@ $control_id = (int)($input['control_id'] ?? 0);
 $action = trim($input['action'] ?? '');
 $comment = trim($input['comment'] ?? '');
 
-// Новые действия: confirm_reject (подтвердить отказ)
 $valid_actions = ['confirm', 'reject', 'recall', 'confirm_reject'];
 if (!$control_id || !in_array($action, $valid_actions)) {
     echo json_encode(['error' => 'Неверные данные']);
     exit;
 }
 
-// Комментарий обязателен для reject, recall, confirm_reject
 if (($action === 'reject' || $action === 'recall' || $action === 'confirm_reject') && !$comment) {
     echo json_encode(['error' => 'Комментарий обязателен']);
     exit;
@@ -52,20 +50,35 @@ try {
     ");
     $stmt->execute([$status, $comment, $action, $control_id]);
 
-    // Получаем task_id и текущий top_status
-    $stmt = $pdo->prepare("SELECT task_id, top_status FROM rop_control_queue WHERE id = ?");
+    // Получаем task_id, top_status и статус задачи из epk_tasks
+    $stmt = $pdo->prepare("
+        SELECT rcq.task_id, rcq.top_status, et.status as current_task_status
+        FROM rop_control_queue rcq
+        LEFT JOIN epk_tasks et ON rcq.task_id = et.task_id
+        WHERE rcq.id = ?
+    ");
     $stmt->execute([$control_id]);
     $queue_item = $stmt->fetch(PDO::FETCH_ASSOC);
     $task_id = $queue_item['task_id'] ?? null;
     $current_top = $queue_item['top_status'] ?? 'active';
+    $current_status = $queue_item['current_task_status'] ?? '';
 
     if ($task_id) {
-        // Определяем новый статус задачи и top_status
+        $new_task_status = '';
+        $new_top_status = '';
+
         if ($action === 'confirm') {
-            $new_task_status = 'Подтверждена';
-            $new_top_status = $current_top; // Оставляем как есть
+            // Если это задача "Нет контакта" – финализируем её как успешную
+            if ($current_top === 'nocontact') {
+                $new_task_status = 'Согласен';
+                $new_top_status = 'closed';
+            } else {
+                // Для остальных – оставляем как было
+                $new_task_status = 'Подтверждена';
+                $new_top_status = $current_top; // сохраняем
+            }
         } elseif ($action === 'reject') {
-            $new_task_status = 'Назначена'; // Возвращаем в пул
+            $new_task_status = 'Назначена';
             $new_top_status = 'active';
         } elseif ($action === 'recall') {
             $new_task_status = 'На контроле РОП';

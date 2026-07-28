@@ -113,7 +113,7 @@ EOT;
     $data = [
         'model' => 'GigaChat',
         'messages' => [['role' => 'user', 'content' => $prompt]],
-        'temperature' => 0.7,   // повышена для более чёткого разделения
+        'temperature' => 0.7,
         'max_tokens' => 10,
     ];
     $ch = curl_init('https://gigachat.devices.sberbank.ru/api/v1/chat/completions');
@@ -147,7 +147,7 @@ EOT;
     return null;
 }
 
-// === ЛОКАЛЬНАЯ ПРОВЕРКА (только ПДН + короткие) ===
+// === ЛОКАЛЬНАЯ ПРОВЕРКА (ПДН + короткие) ===
 function validateWithGigaChat($text, $callResult) {
     // 1. Проверка ПДН (блокирующая)
     $commonSurnames = 'Иванов|Петров|Сидоров|Смирнов|Кузнецов|Попов|Васильев|Соколов|Михайлов|Новиков|Федоров|Морозов|Волков|Алексеев|Лебедев|Семенов|Егоров|Павлов|Козлов|Степанов|Николаев|Орлов|Андреев|Макаров|Захаров|Зайцев|Соловьев|Борисов|Яковлев|Григорьев|Романов|Воробьев|Антонов|Фролов|Беляев|Гусев|Кузьмин|Медведев|Тихонов|Исаев|Карпов|Афанасьев|Максимов|Мельников|Давыдов|Калинин|Богданов|Осипов|Фомин|Комаров|Поляков|Марков|Шестаков|Нестеров|Кудрявцев|Баранов|Куликов|Коновалов';
@@ -275,7 +275,23 @@ try {
     $nextCallDateTime = ($nextCallDate && $nextCallTime) ? $nextCallDate . ' ' . $nextCallTime : ($nextCallDate ?: null);
     $stmt->execute([$taskStatus, $topStatus, $nextCallDateTime, $taskId]);
 
-    if ($fraudScore < 40) {
+    // ----------------------------------------------------------------
+    // 1. ОТПРАВКА НА КОНТРОЛЬ РОПа
+    // ----------------------------------------------------------------
+    $sendToRop = false;
+
+    if ($callResult === 'nocontact') {
+        // Нет контакта — всегда на контроль
+        $sendToRop = true;
+    } elseif ($callResult === 'noanswer') {
+        // Недозвон — никогда на контроль
+        $sendToRop = false;
+    } else {
+        // Остальные статусы: по фрод-скору
+        $sendToRop = ($fraudScore < 40);
+    }
+
+    if ($sendToRop) {
         $tabelStmt = $pdo->prepare("SELECT user_tabel FROM epk_tasks WHERE task_id = ?");
         $tabelStmt->execute([$taskId]);
         $tabel = $tabelStmt->fetchColumn() ?: 'unknown';
@@ -288,11 +304,34 @@ try {
         $stmt->execute([$taskId, $userId, $tabel, $fraudScore, $commentText, $topStatus]);
     }
 
+    // ----------------------------------------------------------------
+    // 2. ПРОВЕРКА НА 4 НЕДОЗВОНА ЗА НЕДЕЛЮ (предложение перевести в отказ)
+    // ----------------------------------------------------------------
+    $suggestReject = false;
+    if (in_array($callResult, ['noanswer', 'nocontact'])) {
+        $weekAgo = date('Y-m-d H:i:s', strtotime('-7 days'));
+        $stmtCount = $pdo->prepare("
+            SELECT COUNT(*) 
+            FROM call_comments 
+            WHERE task_id = ? 
+              AND user_id = ? 
+              AND call_result IN ('noanswer', 'nocontact')
+              AND created_at >= ?
+        ");
+        $stmtCount->execute([$taskId, $userId, $weekAgo]);
+        $failCount = (int)$stmtCount->fetchColumn();
+
+        if ($failCount >= 4) {
+            $suggestReject = true;
+        }
+    }
+
+    // Обновляем статистику менеджера (только если не noanswer и не nocontact, чтобы не засорять)
     $tabelStmt = $pdo->prepare("SELECT user_tabel FROM epk_tasks WHERE task_id = ?");
     $tabelStmt->execute([$taskId]);
     $tabel = $tabelStmt->fetchColumn() ?: 'unknown';
 
-    $isLow = ($fraudScore < 40) ? 1 : 0;
+    $isLow = ($fraudScore < 40 && !in_array($callResult, ['noanswer', 'nocontact'])) ? 1 : 0;
     $stmt = $pdo->prepare("
         INSERT INTO manager_call_stats (user_id, tabel, total_calls, fraud_flags, last_call_date, updated_at)
         VALUES (?, ?, 1, ?, date('now'), datetime('now'))
@@ -313,6 +352,7 @@ try {
         'call_count' => $callCount,
         'new_status' => $taskStatus,
         'top_status' => $topStatus,
+        'suggest_reject' => $suggestReject,
         'message' => 'Звонок сохранен'
     ]);
 

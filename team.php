@@ -674,6 +674,8 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
     <?php if (in_array($user_role, ['admin', 'head', 'territory_head', 'terman'])): ?>
         <a href="team_report.php?date=<?= $date_to ?>">📋 Протокол</a>
     <?php endif; ?>
+    <!-- Ссылка на отчёт термена (добавлена) -->
+    <a href="terman_report.php?year=<?= date('Y', strtotime($date_to)) ?>&month=<?= date('m', strtotime($date_to)) ?>">📋 Отчёт термена</a>
     <a href="employee_meeting.php">📋 Встреча с сотрудником</a>
     <a href="logout.php">🚪 Выйти</a>
     <form class="date-form" method="GET" action="team.php">

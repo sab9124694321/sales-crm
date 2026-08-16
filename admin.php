@@ -28,6 +28,13 @@ if(isset($_GET['change_manager']) && isset($_GET['new_manager_id'])){
 
 if(isset($_GET['delete'])){$r=$pdo->prepare("SELECT role FROM users WHERE id=?");$r->execute([$_GET['delete']]);if($r->fetchColumn()!='admin'){$pdo->prepare("DELETE FROM users WHERE id=?")->execute([$_GET['delete']]);}header("Location: admin.php?tab=employees");exit;}
 if(isset($_GET['move_user'])){if(isset($_GET['new_territory'])&&$_GET['new_territory']!=='')$pdo->prepare("UPDATE users SET territory_id=? WHERE id=?")->execute([$_GET['new_territory'],$_GET['move_user']]);header("Location: admin.php?tab=employees");exit;}
+
+// === НОВОЕ: удаление территории ===
+if(isset($_GET['delete_territory'])){
+    $pdo->prepare("DELETE FROM territories WHERE id=?")->execute([$_GET['delete_territory']]);
+    header("Location: admin.php?tab=territories");
+    exit;
+}
 if($_SERVER['REQUEST_METHOD']==='POST'&&isset($_POST['save_user'])){
     $pass=password_hash($_POST['password']??'123456',PASSWORD_DEFAULT);
     $manager_id = null;
@@ -46,6 +53,13 @@ if($_SERVER['REQUEST_METHOD']==='POST'&&isset($_POST['save_user'])){
     $msg='<div style="background:#d4edda;padding:10px;border-radius:8px;margin-bottom:15px">✅ Сохранено</div>';
 }
 if($_SERVER['REQUEST_METHOD']==='POST'&&isset($_POST['create_territory'])){$pdo->prepare("INSERT INTO territories(name,code) VALUES(?,?)")->execute([$_POST['terr_name'],$_POST['terr_code']]);$msg='<div style="background:#d4edda;padding:10px;border-radius:8px;margin-bottom:15px">✅ Территория создана</div>';}
+
+// === НОВОЕ: редактирование территории ===
+if($_SERVER['REQUEST_METHOD']==='POST'&&isset($_POST['edit_territory'])){
+    $pdo->prepare("UPDATE territories SET name=?, code=? WHERE id=?")
+       ->execute([$_POST['terr_name'], $_POST['terr_code'], $_POST['terr_id']]);
+    $msg='<div style="background:#d4edda;padding:10px;border-radius:8px;margin-bottom:15px">✅ Территория обновлена</div>';
+}
 if($_SERVER['REQUEST_METHOD']==='POST'&&isset($_POST['set_plan'])){
     $values=[$_POST['plan_tabel'],$_POST['period'],$_POST['calls_plan']??0,$_POST['calls_answered_plan']??0,$_POST['meetings_plan']??0,$_POST['contracts_plan']??0,$_POST['registrations_plan']??0,$_POST['smart_cash_plan']??0,$_POST['pos_systems_plan']??0,$_POST['inn_leads_plan']??0,$_POST['teams_plan']??0,$_POST['turnover_plan']??0];
     if(isset($_POST['apply_all'])&&$_POST['apply_all']=='1'){
@@ -257,8 +271,35 @@ function changeManager(userId, selectEl) {
 <label><input type="checkbox" name="apply_all" value="1"> Применить ко всем менеджерам</label>
 <button type="submit" class="btn" style="margin-top:10px">💾 Сохранить</button></form>
 
-<?php elseif($tab=='territories'): ?><h3>Территории</h3><form method="POST"><input type="hidden" name="create_territory" value="1"><input name="terr_name" placeholder="Название" required><input name="terr_code" placeholder="Код" required><button type="submit" class="btn btn-sm">➕</button></form>
-<table><?php foreach($territories as$t)echo"<tr><td>{$t['name']}</td><td>{$t['code']}</td></tr>"; ?></table>
+<?php elseif($tab=='territories'): ?>
+<h3>Территории</h3>
+<form method="POST"><input type="hidden" name="create_territory" value="1"><input name="terr_name" placeholder="Название" required><input name="terr_code" placeholder="Код" required><button type="submit" class="btn btn-sm">➕</button></form>
+<table>
+<tr><th>Название</th><th>Код</th><th>Действия</th></tr>
+<?php foreach($territories as $t): ?>
+<tr>
+<td><?= htmlspecialchars($t['name']) ?></td>
+<td><?= htmlspecialchars($t['code']) ?></td>
+<td>
+<a href="?tab=territories&edit=<?= $t['id'] ?>" class="btn btn-sm">✏️</a>
+<a href="?tab=territories&delete_territory=<?= $t['id'] ?>" onclick="return confirm('Удалить территорию <?= htmlspecialchars($t['name']) ?>?')" style="color:red">✕</a>
+</td>
+</tr>
+<?php endforeach; ?>
+</table>
+<?php if(isset($_GET['edit'])):
+$edit_terr=$pdo->prepare("SELECT * FROM territories WHERE id=?");$edit_terr->execute([$_GET['edit']]);$et=$edit_terr->fetch();
+?>
+<h4 style="margin-top:20px">✏️ Редактировать территорию</h4>
+<form method="POST" style="display:flex;gap:10px;align-items:center;margin-top:10px">
+<input type="hidden" name="edit_territory" value="1">
+<input type="hidden" name="terr_id" value="<?= $et['id'] ?>">
+<input type="text" name="terr_name" value="<?= htmlspecialchars($et['name']) ?>" required style="padding:6px 10px;border:1px solid #ccc;border-radius:4px">
+<input type="text" name="terr_code" value="<?= htmlspecialchars($et['code']) ?>" required style="padding:6px 10px;border:1px solid #ccc;border-radius:4px">
+<button type="submit" class="btn btn-sm">💾 Сохранить</button>
+<a href="?tab=territories" class="btn btn-sm">Отмена</a>
+</form>
+<?php endif; ?>
 
 <?php elseif($tab=='terman'): ?><h3>Термены</h3><form method="POST"><input type="hidden" name="assign_terman" value="1"><select name="terman_tabel"><option value="">Термен</option><?php foreach($termans as$tm)echo"<option value='{$tm['tabel_number']}'>".htmlspecialchars($tm['full_name'])."</option>"; ?></select><select name="territory_id"><option value="">Территория</option><?php foreach($territories as$t)echo"<option value='{$t['id']}'>".htmlspecialchars($t['name'])."</option>"; ?></select><button type="submit" class="btn btn-sm">🔗</button></form>
 <table><?php foreach($terman_links as$tl)echo"<tr><td>{$tl['terman_name']}</td><td>{$tl['terr_name']}</td><td><a href='?remove_terman={$tl['id']}' style='color:red'>✕</a></td></tr>"; ?></table>

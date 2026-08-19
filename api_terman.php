@@ -17,13 +17,13 @@ if (!in_array($role, $allowed)) {
     exit;
 }
 
-$action = $_POST['action'] ?? '';
+$action = $_POST['action'] ?? $_GET['action'] ?? '';
 
 // ── 1. Сохранение отсутствия ────────────────────────────
 if ($action === 'save_absence') {
     $tabel = trim($_POST['tabel'] ?? '');
     $date  = trim($_POST['date'] ?? '');
-    $type  = trim($_POST['type'] ?? ''); // '' – удалить, 'X' – отметить
+    $type  = trim($_POST['type'] ?? '');
 
     if (!$tabel || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
         echo json_encode(['error' => 'Некорректные данные']);
@@ -36,7 +36,7 @@ if ($action === 'save_absence') {
             $stmt->execute([$tabel, $date]);
         } else {
             $stmt = $pdo->prepare("REPLACE INTO employee_absences (employee_tabel, absence_date, absence_type, created_by) VALUES (?, ?, ?, ?)");
-            $stmt->execute([$tabel, $date, $type, $_SESSION['tabel_number'] ?? 'system']);
+            $stmt->execute([$tabel, $date, $type, $_SESSION['user_id']]);
         }
         echo json_encode(['success' => true]);
     } catch (Exception $e) {
@@ -45,7 +45,7 @@ if ($action === 'save_absence') {
     exit;
 }
 
-// ── 2. Сохранение цветов (глобальные настройки, territory_id = NULL) ──
+// ── 2. Сохранение цветов ─────────────────────────────────
 if ($action === 'save_colors') {
     $red    = (int)($_POST['red_max'] ?? 1);
     $yellow = (int)($_POST['yellow_max'] ?? 2);
@@ -57,12 +57,10 @@ if ($action === 'save_colors') {
     }
 
     try {
-        // Удаляем старую запись с territory_id = NULL (если есть)
         $stmt = $pdo->prepare("DELETE FROM terman_color_settings WHERE terbank_id = ? AND territory_id IS NULL");
         $stmt->execute([$terbank]);
-        // Вставляем новую
         $stmt = $pdo->prepare("INSERT INTO terman_color_settings (terbank_id, territory_id, red_max, yellow_max, updated_by) VALUES (?, NULL, ?, ?, ?)");
-        $stmt->execute([$terbank, $red, $yellow, $_SESSION['tabel_number'] ?? 'system']);
+        $stmt->execute([$terbank, $red, $yellow, $_SESSION['user_id']]);
         echo json_encode(['success' => true]);
     } catch (Exception $e) {
         echo json_encode(['error' => $e->getMessage()]);
@@ -90,6 +88,52 @@ if ($action === 'save_position_date') {
         echo json_encode(['success' => true, 'updated' => $stmt->rowCount()]);
     } catch (Exception $e) {
         echo json_encode(['error' => $e->getMessage()]);
+    }
+    exit;
+}
+
+// ── 4. Сохранение комментария руководителя ──────────────
+if ($action === 'save_head_comment') {
+    $head_tabel = trim($_POST['head_tabel'] ?? '');
+    $date       = trim($_POST['date'] ?? '');
+    $comment    = trim($_POST['comment'] ?? '');
+
+    if (!$head_tabel || !$date) {
+        echo json_encode(['error' => 'Не все поля заполнены']);
+        exit;
+    }
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+        echo json_encode(['error' => 'Неверный формат даты']);
+        exit;
+    }
+
+    try {
+        $stmt = $pdo->prepare("INSERT OR REPLACE INTO head_comments (head_tabel, comment_date, comment, created_by) VALUES (?, ?, ?, ?)");
+        $stmt->execute([$head_tabel, $date, $comment, $_SESSION['user_id']]);
+        echo json_encode(['success' => true]);
+    } catch (Exception $e) {
+        echo json_encode(['error' => $e->getMessage()]);
+    }
+    exit;
+}
+
+// ── 5. Получение комментария руководителя ────────────────
+if ($action === 'get_head_comment') {
+    $head_tabel = trim($_GET['head_tabel'] ?? '');
+    $date       = trim($_GET['date'] ?? '');
+
+    if (!$head_tabel || !$date) {
+        echo json_encode(['comment' => '']);
+        exit;
+    }
+
+    try {
+        $stmt = $pdo->prepare("SELECT comment FROM head_comments WHERE head_tabel = ? AND comment_date = ?");
+        $stmt->execute([$head_tabel, $date]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        echo json_encode(['comment' => $row['comment'] ?? '']);
+    } catch (Exception $e) {
+        echo json_encode(['comment' => '']);
     }
     exit;
 }

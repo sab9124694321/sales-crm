@@ -10,13 +10,14 @@ $user_id = $_SESSION['user_id'];
 $allowed = ['head', 'territory_head', 'admin', 'terman'];
 if (!in_array($role, $allowed)) die('🚫 Доступ запрещён.');
 
-// ── Функция получения продаж по типам (ТЭ, Смарт, ПОС) ──
+// ── Функция получения показателей за день ──────────────
 function getProductCounts($pdo, $tabel, $date_from, $date_to) {
     $sql = "
         SELECT
-            COALESCE(SUM(CASE WHEN product = 'ТЭ' THEN 1 ELSE 0 END), 0) AS mass,
-            COALESCE(SUM(CASE WHEN product = 'Смарт' THEN 1 ELSE 0 END), 0) AS keyv,
-            COALESCE(SUM(CASE WHEN product = 'ПОС' THEN 1 ELSE 0 END), 0) AS kas
+            COUNT(*) AS total,
+            SUM(CASE WHEN is_key = 1 THEN 1 ELSE 0 END) AS keyv,
+            SUM(CASE WHEN product IN ('ПОС', 'Смарт') THEN 1 ELSE 0 END) AS kas,
+            SUM(CASE WHEN station_type = 'target' THEN 1 ELSE 0 END) AS target
         FROM inn_records
         WHERE employee_tabel = ?
           AND DATE(sale_date) BETWEEN ? AND ?
@@ -25,16 +26,17 @@ function getProductCounts($pdo, $tabel, $date_from, $date_to) {
     $stmt->execute([$tabel, $date_from, $date_to]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
     return [
-        'mass' => (int) $row['mass'],
-        'keyv' => (int) $row['keyv'],
-        'kas'  => (int) $row['kas']
+        'total'  => (int) $row['total'],
+        'keyv'   => (int) $row['keyv'],
+        'kas'    => (int) $row['kas'],
+        'target' => (int) $row['target']
     ];
 }
 
-// ── Функция получения комментария руководителя на дату ──
-function getHeadComment($pdo, $head_tabel, $date) {
-    $stmt = $pdo->prepare("SELECT comment FROM head_comments WHERE head_tabel = ? AND comment_date = ?");
-    $stmt->execute([$head_tabel, $date]);
+// ── Универсальная функция получения комментария (по роли) ──
+function getComment($pdo, $user_tabel, $date, $target_role = 'head') {
+    $stmt = $pdo->prepare("SELECT comment FROM head_comments WHERE head_tabel = ? AND comment_date = ? AND target_role = ?");
+    $stmt->execute([$user_tabel, $date, $target_role]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
     return $row['comment'] ?? '';
 }
@@ -54,33 +56,37 @@ function countWorkingDays($start, $end) {
     return $days;
 }
 
-// ── Параметры месяца ──────────────────────────────────────
-$last_data = $pdo->query("SELECT MAX(sale_date) as max_date FROM inn_records WHERE sale_date IS NOT NULL")->fetch();
-$last_year  = $last_data && $last_data['max_date'] ? (int) date('Y', strtotime($last_data['max_date'])) : (int) date('Y');
-$last_month = $last_data && $last_data['max_date'] ? (int) date('m', strtotime($last_data['max_date'])) : (int) date('m');
+// ── Определяем параметры из GET (дата) ──────────────────
+$selected_date = isset($_GET['date']) ? $_GET['date'] : date('Y-m-d', strtotime('-1 day'));
+if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $selected_date)) {
+    $selected_date = date('Y-m-d', strtotime('-1 day'));
+}
+$today = date('Y-m-d');
+if ($selected_date > $today) {
+    $selected_date = $today;
+}
 
-$year  = isset($_GET['year'])  ? (int) $_GET['year']  : $last_year;
-$month = isset($_GET['month']) ? (int) $_GET['month'] : $last_month;
+$year = (int) date('Y', strtotime($selected_date));
+$month = (int) date('m', strtotime($selected_date));
+$max_day = (int) date('d', strtotime($selected_date));
+
 $days_in_month = cal_days_in_month(CAL_GREGORIAN, $month, $year);
+if ($max_day > $days_in_month) $max_day = $days_in_month;
+$today_day = (int) date('d');
+$today_month = (int) date('m');
+$today_year = (int) date('Y');
+if ($year == $today_year && $month == $today_month && $max_day > $today_day) {
+    $max_day = $today_day;
+}
+if ($max_day < 1) $max_day = 1;
+
+$display_days = range(1, $max_day);
+
 $month_names = ['', 'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 $month_name = $month_names[$month];
 $period = sprintf('%04d-%02d', $year, $month);
-// Исправлено: даты с ведущими нулями
 $date_from = sprintf('%04d-%02d-01', $year, $month);
 $date_to   = sprintf('%04d-%02d-%02d', $year, $month, $days_in_month);
-
-// ── Определяем, какие дни показывать (только прошедшие) ──
-$today = new DateTime();
-$current_year = (int) $today->format('Y');
-$current_month = (int) $today->format('m');
-$current_day = (int) $today->format('d');
-
-if ($year == $current_year && $month == $current_month) {
-    $max_day = $current_day;
-} else {
-    $max_day = $days_in_month;
-}
-$display_days = range(1, $max_day);
 
 // ── Фильтр по территории ──────────────────────────────────
 $territory_filter = isset($_GET['territory']) ? (int) $_GET['territory'] : 0;
@@ -103,16 +109,17 @@ $sql .= " ORDER BY t.name, h.full_name, u.full_name";
 $managers = $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
 if (empty($managers)) die('Нет активных менеджеров');
 
-// ── Планы (contracts_plan) ────────────────────────────────
+// ── Планы (contracts_plan) ──────────────────────────────
 $plans = [];
 $stmt = $pdo->prepare("SELECT tabel_number, contracts_plan FROM plans WHERE period = ?");
 $stmt->execute([$period]);
 while ($r = $stmt->fetch()) {
-    $plans[(string)$r['tabel_number']] = (int)$r['contracts_plan'];
+    $t = (string)$r['tabel_number'];
+    $plans[$t] = (int)$r['contracts_plan'];
 }
 
-// ── Сбор продаж и отсутствий ─────────────────────────────
-$sales = [];
+// ── Сбор продаж, отсутствий и целевых ──────────────────
+$sales = []; // структура: $sales[tabel][date] = ['total'=>, 'keyv'=>, 'kas'=>, 'target'=>]
 $absences = [];
 foreach ($managers as $m) {
     $t = trim((string)$m['tabel_number']);
@@ -120,7 +127,6 @@ foreach ($managers as $m) {
         $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
         $sales[$t][$date_str] = getProductCounts($pdo, $t, $date_str, $date_str);
     }
-    // Исправленный запрос отсутствий с правильными датами
     $stmt = $pdo->prepare("
         SELECT absence_date 
         FROM employee_absences 
@@ -132,34 +138,21 @@ foreach ($managers as $m) {
     $absences[$t] = array_fill_keys($abs, true);
 }
 
-// === ОТЛАДКА: выводим содержимое absences для менеджера 698463 ===
-if (isset($absences['698463']) && !empty($absences['698463'])) {
-    echo "<!-- ОТЛАДКА: Для 698463 найдены даты: " . implode(', ', array_keys($absences['698463'])) . " -->\n";
-} else {
-    echo "<!-- ОТЛАДКА: Для 698463 отсутствия не найдены или массив пуст -->\n";
-}
-echo "<!-- ОТЛАДКА: date_from=$date_from, date_to=$date_to -->\n";
-// ========================================================
-
-// ── Факт за месяц ──────────────────────────────────────────
+// ── Факт за месяц и целевые за месяц ──────────────────
 $fact_month = [];
-$keyv_month = [];
-$kas_month = [];
+$target_month = [];
 foreach ($sales as $t => $days) {
     $total = 0;
-    $total_keyv = 0;
-    $total_kas = 0;
+    $target = 0;
     foreach ($days as $cnt) {
-        $total += $cnt['mass'] + $cnt['keyv'] + $cnt['kas'];
-        $total_keyv += $cnt['keyv'];
-        $total_kas += $cnt['kas'];
+        $total += $cnt['total'];
+        $target += $cnt['target'];
     }
     $fact_month[$t] = $total;
-    $keyv_month[$t] = $total_keyv;
-    $kas_month[$t] = $total_kas;
+    $target_month[$t] = $target;
 }
 
-// ── Настройки цветов ──────────────────────────────────────
+// ── Настройки цветов (для дальтоников) ────────────────
 $colors = $pdo->query("SELECT red_max, yellow_max FROM terman_color_settings WHERE territory_id IS NULL ORDER BY id DESC LIMIT 1")->fetch();
 if (!$colors) $colors = ['red_max' => 1, 'yellow_max' => 2];
 
@@ -175,12 +168,20 @@ function calcStaz($date) {
     }
 }
 
+// Новая цветовая схема для дальтоников
 function getDayColor($cnt, $colors) {
     $red = (int) ($colors['red_max'] ?? 1);
     $yellow = (int) ($colors['yellow_max'] ?? 2);
-    if ($cnt <= $red) return ['bg' => '#ffcdd2', 'txt' => '#b71c1c'];
-    if ($cnt <= $yellow) return ['bg' => '#fff9c4', 'txt' => '#f57f17'];
-    return ['bg' => '#c8e6c9', 'txt' => '#1b5e20'];
+    if ($cnt <= $red) {
+        // Ярко-красный, текст тёмный
+        return ['bg' => '#ff6b6b', 'txt' => '#4a0000'];
+    }
+    if ($cnt <= $yellow) {
+        // Ярко-жёлтый, текст тёмный
+        return ['bg' => '#ffd93d', 'txt' => '#5a3e00'];
+    }
+    // Ярко-зелёный, текст тёмный
+    return ['bg' => '#51cf66', 'txt' => '#003d00'];
 }
 
 // ── ГРУППИРОВКА ────────────────────────────────────────────
@@ -196,13 +197,13 @@ foreach ($managers as $m) {
         $structure[$terr_id] = [
             'name'  => $terr_name,
             'heads' => [],
-            'daily_totals' => array_fill_keys($display_days, ['mass' => 0, 'keyv' => 0, 'kas' => 0]),
+            'daily_totals' => array_fill_keys($display_days, ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0]),
             'total_plan' => 0,
             'total_fact' => 0,
-            'total_keyv' => 0,
-            'total_kas'  => 0,
+            'total_target'=> 0,
             'total_rr'   => 0,
             'total_vp'   => 0,
+            'total_cs'   => 0,
         ];
     }
     if (!isset($structure[$terr_id]['heads'][$head_name])) {
@@ -211,10 +212,10 @@ foreach ($managers as $m) {
             'managers' => [],
             'total_plan' => 0,
             'total_fact' => 0,
-            'total_keyv' => 0,
-            'total_kas'  => 0,
+            'total_target'=> 0,
             'total_rr'   => 0,
             'total_vp'   => 0,
+            'total_cs'   => 0,
         ];
     }
     $structure[$terr_id]['heads'][$head_name]['managers'][] = array_merge($m, ['tabel_key' => $tabel_key]);
@@ -223,9 +224,8 @@ foreach ($managers as $m) {
 // ── ВЫЧИСЛЕНИЕ ИТОГОВ ──────────────────────────────────────
 $grand_plan = 0;
 $grand_fact = 0;
-$grand_keyv = 0;
-$grand_kas = 0;
-$grand_daily = array_fill_keys($display_days, ['mass' => 0, 'keyv' => 0, 'kas' => 0]);
+$grand_target = 0;
+$grand_daily = array_fill_keys($display_days, ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0]);
 
 $month_start = sprintf('%04d-%02d-01', $year, $month);
 $month_end = date('Y-m-t', strtotime($month_start));
@@ -236,15 +236,13 @@ $working_days_passed = countWorkingDays($month_start, $today_date);
 foreach ($structure as $terr_id => &$terr) {
     $terr_plan = 0;
     $terr_fact = 0;
-    $terr_keyv = 0;
-    $terr_kas = 0;
-    $terr_daily = array_fill_keys($display_days, ['mass' => 0, 'keyv' => 0, 'kas' => 0]);
+    $terr_target = 0;
+    $terr_daily = array_fill_keys($display_days, ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0]);
 
     foreach ($terr['heads'] as $head_name => &$head_group) {
         $head_plan = 0;
         $head_fact = 0;
-        $head_keyv = 0;
-        $head_kas = 0;
+        $head_target = 0;
 
         foreach ($head_group['managers'] as &$m) {
             $t = $m['tabel_key'];
@@ -252,13 +250,11 @@ foreach ($structure as $terr_id => &$terr) {
 
             $plan = $plans[$t] ?? 0;
             $fact = $fact_month[$t] ?? 0;
-            $keyv = $keyv_month[$t] ?? 0;
-            $kas  = $kas_month[$t] ?? 0;
+            $target = $target_month[$t] ?? 0;
 
             $m['plan'] = $plan;
             $m['fact'] = $fact;
-            $m['keyv'] = $keyv;
-            $m['kas']  = $kas;
+            $m['target'] = $target;
             $m['vp']   = $plan > 0 ? round(($fact / $plan) * 100) : 0;
             $m['rr']   = ($working_days_passed > 0) ? round(($fact / $working_days_passed) * $total_working_days) : 0;
             $start_date = (!empty($m['position_start_date'])) ? $m['position_start_date'] : ($m['created_at'] ?? '');
@@ -266,62 +262,70 @@ foreach ($structure as $terr_id => &$terr) {
 
             $head_plan += $plan;
             $head_fact += $fact;
-            $head_keyv += $keyv;
-            $head_kas += $kas;
+            $head_target += $target;
 
             foreach ($display_days as $d) {
                 $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
-                $cnt = isset($sales[$t][$date_str]) ? $sales[$t][$date_str] : ['mass' => 0, 'keyv' => 0, 'kas' => 0];
-                $terr_daily[$d]['mass'] += $cnt['mass'];
+                $cnt = isset($sales[$t][$date_str]) ? $sales[$t][$date_str] : ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0];
+                $terr_daily[$d]['total'] += $cnt['total'];
                 $terr_daily[$d]['keyv'] += $cnt['keyv'];
                 $terr_daily[$d]['kas']  += $cnt['kas'];
-                $grand_daily[$d]['mass'] += $cnt['mass'];
+                $terr_daily[$d]['target'] += $cnt['target'];
+                $grand_daily[$d]['total'] += $cnt['total'];
                 $grand_daily[$d]['keyv'] += $cnt['keyv'];
                 $grand_daily[$d]['kas']  += $cnt['kas'];
+                $grand_daily[$d]['target'] += $cnt['target'];
             }
         }
 
         $head_group['total_plan'] = $head_plan;
         $head_group['total_fact'] = $head_fact;
-        $head_group['total_keyv'] = $head_keyv;
-        $head_group['total_kas']  = $head_kas;
-        $head_group['total_rr']   = ($working_days_passed > 0 && $head_fact > 0) ? round(($head_fact / $working_days_passed) * $total_working_days) : 0;
-        $head_group['total_vp']   = $head_plan > 0 ? round(($head_fact / $head_plan) * 100) : 0;
+        $head_group['total_target'] = $head_target;
+        $head_group['total_cs'] = $head_target;
+        $head_group['total_rr'] = ($working_days_passed > 0 && $head_fact > 0) ? round(($head_fact / $working_days_passed) * $total_working_days) : 0;
+        $head_group['total_vp'] = $head_plan > 0 ? round(($head_fact / $head_plan) * 100) : 0;
 
         $terr_plan += $head_plan;
         $terr_fact += $head_fact;
-        $terr_keyv += $head_keyv;
-        $terr_kas += $head_kas;
+        $terr_target += $head_target;
     }
 
     $terr['total_plan'] = $terr_plan;
     $terr['total_fact'] = $terr_fact;
-    $terr['total_keyv'] = $terr_keyv;
-    $terr['total_kas']  = $terr_kas;
-    $terr['total_rr']   = ($working_days_passed > 0 && $terr_fact > 0) ? round(($terr_fact / $working_days_passed) * $total_working_days) : 0;
-    $terr['total_vp']   = $terr_plan > 0 ? round(($terr_fact / $terr_plan) * 100) : 0;
+    $terr['total_target'] = $terr_target;
+    $terr['total_cs'] = $terr_target;
+    $terr['total_rr'] = ($working_days_passed > 0 && $terr_fact > 0) ? round(($terr_fact / $working_days_passed) * $total_working_days) : 0;
+    $terr['total_vp'] = $terr_plan > 0 ? round(($terr_fact / $terr_plan) * 100) : 0;
     $terr['daily_totals'] = $terr_daily;
 
     $grand_plan += $terr_plan;
     $grand_fact += $terr_fact;
-    $grand_keyv += $terr_keyv;
-    $grand_kas += $terr_kas;
+    $grand_target += $terr_target;
 }
 unset($terr, $head_group, $m);
-$grand_rr   = ($working_days_passed > 0 && $grand_fact > 0) ? round(($grand_fact / $working_days_passed) * $total_working_days) : 0;
-$grand_vp   = $grand_plan > 0 ? round(($grand_fact / $grand_plan) * 100) : 0;
+$grand_rr = ($working_days_passed > 0 && $grand_fact > 0) ? round(($grand_fact / $working_days_passed) * $total_working_days) : 0;
+$grand_vp = $grand_plan > 0 ? round(($grand_fact / $grand_plan) * 100) : 0;
+$grand_cs = $grand_target;
 
 $days_reverse = array_reverse($display_days);
 $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+
+// ── Подготовка комментариев на сегодня ──
+$today_str = date('Y-m-d');
+$manager_comments = [];
+foreach ($managers as $m) {
+    $t = trim((string)$m['tabel_number']);
+    $manager_comments[$t] = getComment($pdo, $t, $today_str, 'manager');
+}
 ?>
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>📋 Отчёт термена — <?= $month_name ?> <?= $year ?></title>
+    <title>📋 Отчёт термена — <?= $selected_date ?></title>
     <link rel="stylesheet" href="style.css">
     <style>
-        /* Стили (без изменений) */
+        /* Базовые стили (адаптированы под 4 столбца в днях) */
         body{font-family:system-ui,sans-serif;background:#f5f5f5;padding:20px;margin:0;}
         .container{max-width:100%;margin:0 auto;background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.1);}
         .nav{display:flex;align-items:center;padding:12px 20px;background:linear-gradient(135deg,#1a1a2e,#16213e);color:#fff;border-radius:16px;margin-bottom:20px;gap:12px;flex-wrap:wrap;}
@@ -359,7 +363,7 @@ $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
         .edit-icon:hover{opacity:1;}
         .comment-icon{cursor:pointer;color:#6c757d;font-size:10px;margin-left:3px;opacity:.7;}
         .comment-icon:hover{opacity:1;color:#0d6efd;}
-        .absence-mark{background:#eeeeee !important;color:#999 !important;border:1px solid #ddd !important;}
+        .absence-mark{background:#e0e0e0 !important;color:#555 !important;border:1px solid #ccc !important;}
         .no-data{padding:40px;text-align:center;color:#888;font-size:16px;background:#fafafa;border-radius:6px;border:1px dashed #ccc;}
         .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100;justify-content:center;align-items:center;}
         .modal.active{display:flex;}
@@ -381,7 +385,11 @@ $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
         .day-subheader th{background:#e3f2fd;font-weight:400;font-size:7px;padding:2px 1px;}
         .sub-col{min-width:15px;}
         .head-row td{background:#f3e5f5;font-weight:600;text-align:left;padding-left:8px;}
-        .comment-cell{background:#f3e5f5;text-align:left;padding-left:6px;font-size:8px;max-width:100px;overflow:hidden;text-overflow:ellipsis;}
+        .comment-cell{background:#f3e5f5;text-align:left;padding-left:6px;font-size:8px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+        .manager-comment-cell{background:transparent;text-align:left;padding-left:6px;font-size:8px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+        /* Стили для ячеек дня – цвета задаются через inline style, но можно добавить резервные */
+        .cell-day.weekend{background:#f0f0f0 !important;color:#999 !important;}
+        .absence-mark{background:#e0e0e0 !important;color:#555 !important;}
     </style>
 </head>
 <body>
@@ -401,17 +409,12 @@ $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 
 <div class="container">
     <h1>📋 Ежедневные продажи: по ГОСБ</h1>
-    <div class="subtitle">Период: <?= $month_name ?> <?= $year ?> | Пользователь: <?= htmlspecialchars((string)($user_name ?? '')) ?></div>
+    <div class="subtitle">Период: <?= $month_name ?> <?= $year ?> (по <?= $selected_date ?>) | Пользователь: <?= htmlspecialchars((string)($user_name ?? '')) ?></div>
 
     <div class="top-bar no-print">
         <form method="get" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
-            <label>Год: <input type="number" name="year" value="<?= $year ?>" min="2024" max="2030" style="width:70px;"></label>
-            <label>Месяц:
-                <select name="month">
-                    <?php for ($i = 1; $i <= 12; $i++): ?>
-                        <option value="<?= $i ?>" <?= $i == $month ? 'selected' : '' ?>><?= $month_names[$i] ?></option>
-                    <?php endfor; ?>
-                </select>
+            <label>Дата:
+                <input type="date" name="date" value="<?= $selected_date ?>" style="width:160px;">
             </label>
             <label>Территория:
                 <select name="territory">
@@ -437,72 +440,103 @@ $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
     <?php if (empty($structure)): ?>
         <div class="no-data">😕 Нет данных</div>
     <?php else: ?>
-        <!-- Сводная таблица -->
+        <!-- Сводная таблица (с ЦС в сводке и 4 колонками в днях) -->
         <h2 style="margin:20px 0 10px;font-size:18px;">📊 Сводка по ГОСБ</h2>
         <div class="table-wrap" id="summary-table">
             <table>
                 <thead>
                     <tr>
                         <th>ГОСБ</th>
+                        <th>Начальник отдела</th>
                         <th>План месяц</th>
                         <th>Факт месяц</th>
                         <th>RR</th>
                         <th>ВП</th>
-                        <th>Кл</th>
-                        <th>РП</th>
-                        <th>Кс</th>
+                        <th>ЦС</th>
                         <?php foreach ($days_reverse as $d): 
                             $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
                             $weekday_num = date('N', strtotime($date_str)) - 1;
                             $weekday = $weekdays_ru[$weekday_num];
                         ?>
-                            <th colspan="3" class="<?= date('N', strtotime($date_str)) >= 6 ? 'weekend' : '' ?>">
+                            <th colspan="4" class="<?= date('N', strtotime($date_str)) >= 6 ? 'weekend' : '' ?>">
                                 <?= $d ?><br><small><?= $weekday ?></small>
                             </th>
                         <?php endforeach; ?>
                     </tr>
                     <tr>
-                        <th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th>
+                        <th></th><th></th><th></th><th></th><th></th><th></th><th></th>
                         <?php foreach ($days_reverse as $d): ?>
                             <th class="sub-col">ИНН</th>
                             <th class="sub-col">Кл</th>
                             <th class="sub-col">Кс</th>
+                            <th class="sub-col">ЦС</th>
                         <?php endforeach; ?>
                     </tr>
                 </thead>
                 <tbody>
                 <?php foreach ($structure as $terr_id => $terr): 
-                    $daily = $terr['daily_totals'] ?? array_fill_keys($display_days, ['mass'=>0,'keyv'=>0,'kas'=>0]);
+                    $daily = $terr['daily_totals'] ?? array_fill_keys($display_days, ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0]);
+                    foreach ($terr['heads'] as $head_name => $head_group):
+                        $head_daily = array_fill_keys($display_days, ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0]);
+                        foreach ($head_group['managers'] as $m) {
+                            $t = $m['tabel_key'];
+                            if (empty($t)) continue;
+                            foreach ($display_days as $d) {
+                                $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
+                                $cnt = isset($sales[$t][$date_str]) ? $sales[$t][$date_str] : ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0];
+                                $head_daily[$d]['total'] += $cnt['total'];
+                                $head_daily[$d]['keyv'] += $cnt['keyv'];
+                                $head_daily[$d]['kas']  += $cnt['kas'];
+                                $head_daily[$d]['target'] += $cnt['target'];
+                            }
+                        }
                 ?>
                     <tr>
-                        <td style="text-align:left;padding-left:8px;font-weight:600;"><?= htmlspecialchars((string)($terr['name'] ?? '')) ?></td>
-                        <td><?= (int) ($terr['total_plan'] ?? 0) ?></td>
-                        <td><?= (int) ($terr['total_fact'] ?? 0) ?></td>
-                        <td style="font-weight:700;color:<?= (int) ($terr['total_rr'] ?? 0) >= (int) ($terr['total_plan'] ?? 0) ? '#2e7d32' : ((int) ($terr['total_rr'] ?? 0) >= (int) ($terr['total_plan'] ?? 0)*0.7 ? '#ed6c02' : '#d32f2f') ?>"><?= (int) ($terr['total_rr'] ?? 0) ?></td>
-                        <td style="font-weight:700;color:<?= (int) ($terr['total_vp'] ?? 0) >= 100 ? '#2e7d32' : ((int) ($terr['total_vp'] ?? 0) >= 70 ? '#ed6c02' : '#d32f2f') ?>"><?= (int) ($terr['total_vp'] ?? 0) ?>%</td>
-                        <td><?= (int) ($terr['total_keyv'] ?? 0) ?></td>
-                        <td>0</td>
-                        <td><?= (int) ($terr['total_kas'] ?? 0) ?></td>
+                        <td style="text-align:left;padding-left:8px;font-weight:600;"><?= htmlspecialchars($terr['name']) ?></td>
+                        <td style="text-align:left;padding-left:8px;"><?= htmlspecialchars($head_name) ?></td>
+                        <td><?= (int) $head_group['total_plan'] ?></td>
+                        <td><?= (int) $head_group['total_fact'] ?></td>
+                        <td style="font-weight:700;color:<?= (int) $head_group['total_rr'] >= (int) $head_group['total_plan'] ? '#2e7d32' : ((int) $head_group['total_rr'] >= (int) $head_group['total_plan']*0.7 ? '#ed6c02' : '#d32f2f') ?>"><?= (int) $head_group['total_rr'] ?></td>
+                        <td style="font-weight:700;color:<?= (int) $head_group['total_vp'] >= 100 ? '#2e7d32' : ((int) $head_group['total_vp'] >= 70 ? '#ed6c02' : '#d32f2f') ?>"><?= (int) $head_group['total_vp'] ?>%</td>
+                        <td><?= (int) $head_group['total_cs'] ?></td>
                         <?php foreach ($days_reverse as $d): ?>
-                            <td><?= isset($daily[$d]['mass']) ? (int) $daily[$d]['mass'] : '' ?></td>
-                            <td><?= isset($daily[$d]['keyv']) ? (int) $daily[$d]['keyv'] : '' ?></td>
-                            <td><?= isset($daily[$d]['kas']) ? (int) $daily[$d]['kas'] : '' ?></td>
+                            <td><?= isset($head_daily[$d]['total']) ? (int) $head_daily[$d]['total'] : '' ?></td>
+                            <td><?= isset($head_daily[$d]['keyv']) ? (int) $head_daily[$d]['keyv'] : '' ?></td>
+                            <td><?= isset($head_daily[$d]['kas']) ? (int) $head_daily[$d]['kas'] : '' ?></td>
+                            <td><?= isset($head_daily[$d]['target']) ? (int) $head_daily[$d]['target'] : '' ?></td>
                         <?php endforeach; ?>
                     </tr>
                 <?php endforeach; ?>
+                <!-- Итог по территории -->
+                <tr class="totals-row">
+                    <td style="text-align:left;padding-left:8px;font-weight:700;">🎯 ИТОГО по <?= htmlspecialchars($terr['name']) ?></td>
+                    <td></td>
+                    <td><?= (int) $terr['total_plan'] ?></td>
+                    <td><?= (int) $terr['total_fact'] ?></td>
+                    <td style="font-weight:700;color:<?= (int) $terr['total_rr'] >= (int) $terr['total_plan'] ? '#2e7d32' : ((int) $terr['total_rr'] >= (int) $terr['total_plan']*0.7 ? '#ed6c02' : '#d32f2f') ?>"><?= (int) $terr['total_rr'] ?></td>
+                    <td style="font-weight:700;color:<?= (int) $terr['total_vp'] >= 100 ? '#2e7d32' : ((int) $terr['total_vp'] >= 70 ? '#ed6c02' : '#d32f2f') ?>"><?= (int) $terr['total_vp'] ?>%</td>
+                    <td><?= (int) $terr['total_cs'] ?></td>
+                    <?php foreach ($days_reverse as $d): ?>
+                        <td><?= isset($daily[$d]['total']) ? (int) $daily[$d]['total'] : '' ?></td>
+                        <td><?= isset($daily[$d]['keyv']) ? (int) $daily[$d]['keyv'] : '' ?></td>
+                        <td><?= isset($daily[$d]['kas']) ? (int) $daily[$d]['kas'] : '' ?></td>
+                        <td><?= isset($daily[$d]['target']) ? (int) $daily[$d]['target'] : '' ?></td>
+                    <?php endforeach; ?>
+                </tr>
+                <?php endforeach; ?>
                 <tr class="grand-totals">
-                    <td style="text-align:left;padding-left:8px;">🎯 ИТОГО</td>
+                    <td style="text-align:left;padding-left:8px;">🎯 ВСЕГО</td>
+                    <td></td>
                     <td><?= $grand_plan ?></td>
                     <td><?= $grand_fact ?></td>
                     <td style="font-weight:800;color:<?= $grand_rr >= $grand_plan ? '#2e7d32' : ($grand_rr >= $grand_plan*0.7 ? '#ed6c02' : '#d32f2f') ?>"><?= $grand_rr ?></td>
                     <td style="font-weight:800;color:<?= $grand_vp >= 100 ? '#2e7d32' : ($grand_vp >= 70 ? '#ed6c02' : '#d32f2f') ?>"><?= $grand_vp ?>%</td>
-                    <td><?= $grand_keyv ?></td>
-                    <td>0</td>
-                    <td><?= $grand_kas ?></td>
+                    <td><?= $grand_cs ?></td>
                     <?php foreach ($days_reverse as $d): ?>
-                        <td><?= isset($grand_daily[$d]['mass']) ? (int) $grand_daily[$d]['mass'] : '' ?></td>
+                        <td><?= isset($grand_daily[$d]['total']) ? (int) $grand_daily[$d]['total'] : '' ?></td>
                         <td><?= isset($grand_daily[$d]['keyv']) ? (int) $grand_daily[$d]['keyv'] : '' ?></td>
                         <td><?= isset($grand_daily[$d]['kas']) ? (int) $grand_daily[$d]['kas'] : '' ?></td>
+                        <td><?= isset($grand_daily[$d]['target']) ? (int) $grand_daily[$d]['target'] : '' ?></td>
                     <?php endforeach; ?>
                 </tr>
                 </tbody>
@@ -512,9 +546,9 @@ $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
         <!-- Детальные таблицы по каждой территории -->
         <?php foreach ($structure as $terr_id => $terr): ?>
             <h3 style="margin:30px 0 8px;font-size:16px;background:#e3f2fd;padding:6px 12px;border-radius:4px;">
-                🏢 <?= htmlspecialchars((string)($terr['name'] ?? '')) ?>
+                🏢 <?= htmlspecialchars($terr['name']) ?>
                 <span style="font-weight:400;font-size:13px;color:#555;margin-left:10px;">
-                    План: <?= (int) ($terr['total_plan'] ?? 0) ?>, Факт: <?= (int) ($terr['total_fact'] ?? 0) ?>, RR: <?= (int) ($terr['total_rr'] ?? 0) ?>
+                    План: <?= (int) $terr['total_plan'] ?>, Факт: <?= (int) $terr['total_fact'] ?>, RR: <?= (int) $terr['total_rr'] ?>
                 </span>
             </h3>
             <div class="table-wrap">
@@ -522,38 +556,37 @@ $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
                     <thead>
                         <tr>
                             <th>ФИО Руководителя</th>
-                            <th>Комментарий</th>
+                            <th>Минипротокол</th>
                             <th>ФИО менеджера</th>
                             <th>Стаж (Г.М)</th>
                             <th>RR</th>
                             <th>ВП</th>
-                            <th>Кл</th>
-                            <th>РП</th>
-                            <th>Кс</th>
+                            <th>ЦС</th>
                             <?php foreach ($days_reverse as $d): 
                                 $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
                                 $weekday_num = date('N', strtotime($date_str)) - 1;
                                 $weekday = $weekdays_ru[$weekday_num];
                             ?>
-                                <th colspan="3" class="<?= date('N', strtotime($date_str)) >= 6 ? 'weekend' : '' ?>">
+                                <th colspan="4" class="<?= date('N', strtotime($date_str)) >= 6 ? 'weekend' : '' ?>">
                                     <?= $d ?><br><small><?= $weekday ?></small>
                                 </th>
                             <?php endforeach; ?>
                             <th>План</th><th>Факт</th>
                         </tr>
                         <tr>
-                            <th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th>
+                            <th></th><th></th><th></th><th></th><th></th><th></th><th></th>
                             <?php foreach ($days_reverse as $d): ?>
                                 <th class="sub-col">ИНН</th>
                                 <th class="sub-col">Кл</th>
                                 <th class="sub-col">Кс</th>
+                                <th class="sub-col">ЦС</th>
                             <?php endforeach; ?>
                             <th></th><th></th>
                         </tr>
                     </thead>
                     <tbody>
                     <?php
-                    $total_cols = 11 + 3 * count($days_reverse);
+                    $total_cols = 11 + 4 * count($display_days); // 7 фикс + 4*дней + план+факт
                     foreach ($terr['heads'] as $head_name => $head_group):
                         $managers_list = $head_group['managers'] ?? [];
                         $head_tabel = $head_group['head_tabel'] ?? '';
@@ -561,18 +594,17 @@ $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
                         $head_fact = $head_group['total_fact'] ?? 0;
                         $head_rr   = $head_group['total_rr'] ?? 0;
                         $head_vp   = $head_group['total_vp'] ?? 0;
-                        $head_keyv = $head_group['total_keyv'] ?? 0;
-                        $head_kas  = $head_group['total_kas'] ?? 0;
+                        $head_cs   = $head_group['total_cs'] ?? 0;
                         $comment_date = date('Y-m-d');
-                        $comment = getHeadComment($pdo, $head_tabel, $comment_date);
+                        $head_comment = getComment($pdo, $head_tabel, $comment_date, 'head');
                     ?>
                         <tr class="head-row">
                             <td style="background:#f3e5f5;font-weight:600;text-align:left;padding-left:8px;">
                                 <?= htmlspecialchars($head_name) ?>
-                                <span class="comment-icon no-print" title="Редактировать комментарий" onclick="openHeadCommentModal('<?= htmlspecialchars($head_tabel) ?>','<?= htmlspecialchars($head_name) ?>','<?= date('Y-m-d') ?>')">💬</span>
+                                <span class="comment-icon no-print" title="Редактировать комментарий руководителя" onclick="openCommentModal('<?= htmlspecialchars($head_tabel) ?>','<?= htmlspecialchars($head_name) ?>','head','<?= date('Y-m-d') ?>')">💬</span>
                             </td>
                             <td class="comment-cell" style="background:#f3e5f5;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                                <?= htmlspecialchars($comment) ?>
+                                <?= htmlspecialchars($head_comment) ?>
                             </td>
                             <td colspan="<?= $total_cols - 2 ?>" style="background:#f3e5f5;"></td>
                         </tr>
@@ -583,24 +615,26 @@ $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
                             <td></td>
                             <td><?= $head_rr ?></td>
                             <td><?= $head_vp ?>%</td>
-                            <td><?= $head_keyv ?></td>
-                            <td>0</td>
-                            <td><?= $head_kas ?></td>
-                            <?php foreach ($days_reverse as $d):
-                                $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
-                                $day_total = ['mass'=>0, 'keyv'=>0, 'kas'=>0];
-                                foreach ($head_group['managers'] as $m) {
-                                    if (isset($sales[$m['tabel_key']][$date_str])) {
-                                        $c = $sales[$m['tabel_key']][$date_str];
-                                        $day_total['mass'] += $c['mass'];
-                                        $day_total['keyv'] += $c['keyv'];
-                                        $day_total['kas'] += $c['kas'];
-                                    }
+                            <td><?= $head_cs ?></td>
+                            <?php 
+                            $head_daily = array_fill_keys($display_days, ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0]);
+                            foreach ($managers_list as $m) {
+                                $t = $m['tabel_key'];
+                                if (empty($t)) continue;
+                                foreach ($display_days as $d) {
+                                    $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
+                                    $cnt = isset($sales[$t][$date_str]) ? $sales[$t][$date_str] : ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0];
+                                    $head_daily[$d]['total'] += $cnt['total'];
+                                    $head_daily[$d]['keyv'] += $cnt['keyv'];
+                                    $head_daily[$d]['kas']  += $cnt['kas'];
+                                    $head_daily[$d]['target'] += $cnt['target'];
                                 }
-                            ?>
-                                <td><?= $day_total['mass'] ?></td>
-                                <td><?= $day_total['keyv'] ?></td>
-                                <td><?= $day_total['kas'] ?></td>
+                            }
+                            foreach ($days_reverse as $d): ?>
+                                <td><?= $head_daily[$d]['total'] ?></td>
+                                <td><?= $head_daily[$d]['keyv'] ?></td>
+                                <td><?= $head_daily[$d]['kas'] ?></td>
+                                <td><?= $head_daily[$d]['target'] ?></td>
                             <?php endforeach; ?>
                             <td><?= $head_plan ?></td>
                             <td><?= $head_fact ?></td>
@@ -613,13 +647,17 @@ $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
                             $fact = (int) ($m['fact'] ?? 0);
                             $rr   = (int) ($m['rr'] ?? 0);
                             $vp   = (int) ($m['vp'] ?? 0);
-                            $keyv = (int) ($m['keyv'] ?? 0);
-                            $kas  = (int) ($m['kas'] ?? 0);
+                            $cs   = (int) ($m['target'] ?? 0); // ЦС за месяц
                             $staz = $m['staz'] ?? '000/00';
+                            $manager_comment = $manager_comments[$t] ?? '';
                         ?>
                             <tr data-tabel="<?= htmlspecialchars((string)$t) ?>">
                                 <td></td>
-                                <td></td>
+                                <!-- Минипротокол для менеджера -->
+                                <td class="manager-comment-cell" style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                                    <?= htmlspecialchars($manager_comment) ?>
+                                    <span class="comment-icon no-print" title="Редактировать комментарий менеджера" onclick="openCommentModal('<?= htmlspecialchars((string)$t) ?>','<?= htmlspecialchars((string)($m['full_name'] ?? '')) ?>','manager','<?= date('Y-m-d') ?>')">💬</span>
+                                </td>
                                 <td class="name-col">
                                     <?= htmlspecialchars((string)($m['full_name'] ?? '')) ?>
                                     <span class="edit-icon no-print" title="Изменить дату ввода"
@@ -628,30 +666,38 @@ $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
                                 <td class="staz-col"><?= $staz ?></td>
                                 <td class="rr-col" style="color:<?= $rr >= $plan ? '#2e7d32' : ($rr >= $plan*0.7 ? '#ed6c02' : '#d32f2f') ?>"><?= $rr ?></td>
                                 <td style="color:<?= $vp >= 100 ? '#2e7d32' : ($vp >= 70 ? '#ed6c02' : '#d32f2f') ?>"><?= $vp ?>%</td>
-                                <td><?= $keyv ?></td>
-                                <td>0</td>
-                                <td><?= $kas ?></td>
+                                <td><?= $cs ?></td>
                                 <?php foreach ($days_reverse as $d):
                                     $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
                                     $is_weekend = date('N', strtotime($date_str)) >= 6;
                                     $absent = isset($absences[$t][$date_str]) ? true : false;
-                                    $cnt = isset($sales[$t][$date_str]) ? $sales[$t][$date_str] : ['mass'=>0,'keyv'=>0,'kas'=>0];
-                                    $total = $cnt['mass'] + $cnt['keyv'] + $cnt['kas'];
+                                    $cnt = isset($sales[$t][$date_str]) ? $sales[$t][$date_str] : ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0];
+                                    $total = $cnt['total'];
+                                    $keyv  = $cnt['keyv'];
+                                    $kas   = $cnt['kas'];
+                                    $target = $cnt['target'];
                                     $cell_class = 'cell-day';
                                     if ($is_weekend) $cell_class .= ' weekend';
                                     if ($absent) {
                                         $cell_class .= ' absence-mark';
-                                        $display = ['Н', 'Н', 'Н'];
+                                        $display_total = 'Н';
+                                        $display_keyv  = 'Н';
+                                        $display_kas   = 'Н';
+                                        $display_target = 'Н';
                                         $style = '';
                                     } else {
-                                        $display = [$cnt['mass'], $cnt['keyv'], $cnt['kas']];
+                                        $display_total = $total;
+                                        $display_keyv  = $keyv;
+                                        $display_kas   = $kas;
+                                        $display_target = $target;
                                         $c = getDayColor($total, $colors);
                                         $style = "background:{$c['bg']};color:{$c['txt']}";
                                     }
                                 ?>
-                                    <td class="<?= $cell_class ?>" style="<?= $style ?>" data-date="<?= $date_str ?>" data-tabel="<?= htmlspecialchars((string)$t) ?>" onclick="toggleAbsence('<?= htmlspecialchars((string)$t) ?>','<?= $date_str ?>')"><?= $display[0] ?></td>
-                                    <td class="<?= $cell_class ?>" style="<?= $style ?>" data-date="<?= $date_str ?>" data-tabel="<?= htmlspecialchars((string)$t) ?>"><?= $display[1] ?></td>
-                                    <td class="<?= $cell_class ?>" style="<?= $style ?>" data-date="<?= $date_str ?>" data-tabel="<?= htmlspecialchars((string)$t) ?>"><?= $display[2] ?></td>
+                                    <td class="<?= $cell_class ?>" style="<?= $style ?>" data-date="<?= $date_str ?>" data-tabel="<?= htmlspecialchars((string)$t) ?>" onclick="toggleAbsence('<?= htmlspecialchars((string)$t) ?>','<?= $date_str ?>')"><?= $display_total ?></td>
+                                    <td class="<?= $cell_class ?>" style="<?= $style ?>" data-date="<?= $date_str ?>" data-tabel="<?= htmlspecialchars((string)$t) ?>"><?= $display_keyv ?></td>
+                                    <td class="<?= $cell_class ?>" style="<?= $style ?>" data-date="<?= $date_str ?>" data-tabel="<?= htmlspecialchars((string)$t) ?>"><?= $display_kas ?></td>
+                                    <td class="<?= $cell_class ?>" style="<?= $style ?>" data-date="<?= $date_str ?>" data-tabel="<?= htmlspecialchars((string)$t) ?>"><?= $display_target ?></td>
                                 <?php endforeach; ?>
                                 <td style="font-weight:600;"><?= $plan ?></td>
                                 <td style="font-weight:600;"><?= $fact ?></td>
@@ -659,34 +705,34 @@ $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
                         <?php endforeach; ?>
                     <?php endforeach; ?>
                     <tr class="totals-row">
-                        <td colspan="2" style="text-align:left;font-weight:700;background:#fff8e1 !important;">🎯 ИТОГО по <?= htmlspecialchars((string)($terr['name'] ?? '')) ?></td>
+                        <td colspan="2" style="text-align:left;font-weight:700;background:#fff8e1 !important;">🎯 ИТОГО по <?= htmlspecialchars($terr['name']) ?></td>
                         <td></td>
                         <td></td>
-                        <td style="background:#fff8e1 !important;"><?= (int) ($terr['total_rr'] ?? 0) ?></td>
-                        <td style="background:#fff8e1 !important;"><?= (int) ($terr['total_vp'] ?? 0) ?>%</td>
-                        <td style="background:#fff8e1 !important;"><?= (int) ($terr['total_keyv'] ?? 0) ?></td>
-                        <td style="background:#fff8e1 !important;">0</td>
-                        <td style="background:#fff8e1 !important;"><?= (int) ($terr['total_kas'] ?? 0) ?></td>
+                        <td style="background:#fff8e1 !important;"><?= (int) $terr['total_rr'] ?></td>
+                        <td style="background:#fff8e1 !important;"><?= (int) $terr['total_vp'] ?>%</td>
+                        <td style="background:#fff8e1 !important;"><?= (int) $terr['total_cs'] ?></td>
                         <?php foreach ($days_reverse as $d):
                             $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
-                            $day_total = ['mass'=>0, 'keyv'=>0, 'kas'=>0];
+                            $day_total = ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0];
                             foreach ($terr['heads'] as $head_group) {
                                 foreach ($head_group['managers'] as $m) {
                                     if (isset($sales[$m['tabel_key']][$date_str])) {
-                                        $c = $sales[$m['tabel_key']][$date_str];
-                                        $day_total['mass'] += $c['mass'];
-                                        $day_total['keyv'] += $c['keyv'];
-                                        $day_total['kas'] += $c['kas'];
+                                        $cnt = $sales[$m['tabel_key']][$date_str];
+                                        $day_total['total'] += $cnt['total'];
+                                        $day_total['keyv'] += $cnt['keyv'];
+                                        $day_total['kas']  += $cnt['kas'];
+                                        $day_total['target'] += $cnt['target'];
                                     }
                                 }
                             }
                         ?>
-                            <td style="font-weight:700;background:#fff8e1 !important;"><?= $day_total['mass'] > 0 ? $day_total['mass'] : '' ?></td>
+                            <td style="font-weight:700;background:#fff8e1 !important;"><?= $day_total['total'] > 0 ? $day_total['total'] : '' ?></td>
                             <td style="font-weight:700;background:#fff8e1 !important;"><?= $day_total['keyv'] > 0 ? $day_total['keyv'] : '' ?></td>
                             <td style="font-weight:700;background:#fff8e1 !important;"><?= $day_total['kas'] > 0 ? $day_total['kas'] : '' ?></td>
+                            <td style="font-weight:700;background:#fff8e1 !important;"><?= $day_total['target'] > 0 ? $day_total['target'] : '' ?></td>
                         <?php endforeach; ?>
-                        <td style="font-weight:700;background:#fff8e1 !important;"><?= (int) ($terr['total_plan'] ?? 0) ?></td>
-                        <td style="font-weight:700;background:#fff8e1 !important;"><?= (int) ($terr['total_fact'] ?? 0) ?></td>
+                        <td style="font-weight:700;background:#fff8e1 !important;"><?= (int) $terr['total_plan'] ?></td>
+                        <td style="font-weight:700;background:#fff8e1 !important;"><?= (int) $terr['total_fact'] ?></td>
                     </tr>
                 </tbody>
             </table>
@@ -695,21 +741,21 @@ $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
     <?php endif; ?>
 
     <div class="no-print" style="margin-top:14px;font-size:12px;color:#888;line-height:1.6;">
-        💡 <b>Как пользоваться:</b> Клик на ячейку дня → отметить/снять отсутствие. Клик на ✏️ → дата ввода в должность. 💬 у руководителя → комментарий для мини-протокола. Настрой цвета → Сохранить. Excel/PDF → выгрузка.
+        💡 <b>Как пользоваться:</b> Клик на ячейку дня → отметить/снять отсутствие. Клик на ✏️ → дата ввода в должность. 💬 у руководителя → минипротокол. 💬 у менеджера → личный комментарий (отображается в столбце «Минипротокол»). Настрой цвета → Сохранить. Excel/PDF → выгрузка.
     </div>
 </div>
 
 <!-- Модалки -->
-<div id="headCommentModal" class="modal">
+<div id="commentModal" class="modal">
     <div class="modal-box">
-        <h3>💬 Комментарий к мини-протоколу</h3>
-        <div id="headCommentInfo" style="font-size:13px;color:#666;margin-bottom:8px;"></div>
-        <label>Дата: <input type="date" id="headCommentDate" style="width:100%;"></label>
-        <label>Комментарий:</label>
-        <textarea id="headCommentText" rows="4"></textarea>
+        <h3 id="commentModalTitle">💬 Комментарий</h3>
+        <div id="commentModalInfo" style="font-size:13px;color:#666;margin-bottom:8px;"></div>
+        <label>Дата: <input type="date" id="commentDate" style="width:100%;"></label>
+        <label>Текст:</label>
+        <textarea id="commentText" rows="4"></textarea>
         <div class="modal-actions">
-            <button class="btn-cancel" onclick="closeModal('headCommentModal')">Отмена</button>
-            <button class="btn-save" onclick="saveHeadComment()">💾 Сохранить</button>
+            <button class="btn-cancel" onclick="closeModal('commentModal')">Отмена</button>
+            <button class="btn-save" onclick="saveComment()">💾 Сохранить</button>
         </div>
     </div>
 </div>
@@ -740,11 +786,44 @@ $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 </div>
 
 <script>
-let currentTabel = '', currentDate = '';
-let currentHeadTabel = '';
+let currentUserTabel = '', currentDate = '', currentRole = '';
+let currentTabel = '', currentDateAbsence = '';
+
+function openCommentModal(userTabel, userName, role, defaultDate) {
+    currentUserTabel = userTabel;
+    currentRole = role;
+    const title = (role === 'head') ? '💬 Минипротокол (руководитель)' : '💬 Личный комментарий менеджера';
+    document.getElementById('commentModalTitle').textContent = title;
+    document.getElementById('commentModalInfo').textContent = (role === 'head' ? 'Руководитель: ' : 'Менеджер: ') + userName;
+    document.getElementById('commentDate').value = defaultDate;
+    fetch('api_terman.php?action=get_comment&user_tabel='+encodeURIComponent(userTabel)+'&date='+encodeURIComponent(defaultDate)+'&role='+encodeURIComponent(role))
+        .then(res => res.json())
+        .then(data => {
+            document.getElementById('commentText').value = data.comment || '';
+        })
+        .catch(() => { document.getElementById('commentText').value = ''; });
+    document.getElementById('commentModal').classList.add('active');
+}
+
+async function saveComment() {
+    const date = document.getElementById('commentDate').value;
+    const comment = document.getElementById('commentText').value;
+    if (!currentUserTabel || !date) { alert('Не хватает данных'); return; }
+    const res = await fetch('api_terman.php', {
+        method:'POST',
+        headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        body:'action=save_comment&user_tabel='+encodeURIComponent(currentUserTabel)
+            +'&date='+encodeURIComponent(date)
+            +'&comment='+encodeURIComponent(comment)
+            +'&role='+encodeURIComponent(currentRole)
+    });
+    const data = await res.json();
+    if(data.success) { alert('✅ Комментарий сохранён!'); location.reload(); }
+    else alert('Ошибка: '+(data.error||'неизвестная'));
+}
 
 function toggleAbsence(tabel, date) {
-    currentTabel = tabel; currentDate = date;
+    currentTabel = tabel; currentDateAbsence = date;
     const cell = document.querySelector(`td[data-date="${date}"][data-tabel="${tabel}"]`);
     const isAbsent = cell && cell.classList.contains('absence-mark');
     document.getElementById('absenceInfo').textContent = 'Сотрудник: ' + tabel + ' | ' + date;
@@ -758,13 +837,14 @@ async function saveAbsence() {
         method:'POST',
         headers:{'Content-Type':'application/x-www-form-urlencoded'},
         body:'action=save_absence&tabel='+encodeURIComponent(currentTabel)
-            +'&date='+encodeURIComponent(currentDate)
+            +'&date='+encodeURIComponent(currentDateAbsence)
             +'&type='+encodeURIComponent(type)
     });
     const data = await res.json();
     if(data.success) location.reload();
     else alert('Ошибка: '+(data.error||'неизвестная'));
 }
+
 function openPositionModal(tabel, name, date) {
     currentTabel = tabel;
     document.getElementById('positionInfo').textContent = name;
@@ -783,36 +863,7 @@ async function savePositionDate() {
     if(data.success) location.reload();
     else alert('Ошибка: '+(data.error||'неизвестная'));
 }
-function openHeadCommentModal(headTabel, headName, defaultDate) {
-    currentHeadTabel = headTabel;
-    document.getElementById('headCommentInfo').textContent = 'Руководитель: ' + headName;
-    document.getElementById('headCommentDate').value = defaultDate;
-    fetch('api_terman.php?action=get_head_comment&head_tabel='+encodeURIComponent(headTabel)+'&date='+encodeURIComponent(defaultDate))
-        .then(res => res.json())
-        .then(data => {
-            document.getElementById('headCommentText').value = data.comment || '';
-        })
-        .catch(() => { document.getElementById('headCommentText').value = ''; });
-    document.getElementById('headCommentModal').classList.add('active');
-}
-async function saveHeadComment() {
-    const date = document.getElementById('headCommentDate').value;
-    const comment = document.getElementById('headCommentText').value;
-    if (!currentHeadTabel || !date) { alert('Не хватает данных'); return; }
-    const res = await fetch('api_terman.php', {
-        method:'POST',
-        headers:{'Content-Type':'application/x-www-form-urlencoded'},
-        body:'action=save_head_comment&head_tabel='+encodeURIComponent(currentHeadTabel)
-            +'&date='+encodeURIComponent(date)
-            +'&comment='+encodeURIComponent(comment)
-    });
-    const data = await res.json();
-    if(data.success) { alert('✅ Комментарий сохранён!'); location.reload(); }
-    else alert('Ошибка: '+(data.error||'неизвестная'));
-}
-function closeModal(id) {
-    document.getElementById(id).classList.remove('active');
-}
+
 async function saveColors() {
     const red = parseInt(document.getElementById('red_max').value);
     const yellow = parseInt(document.getElementById('yellow_max').value);
@@ -827,11 +878,13 @@ async function saveColors() {
     if(data.success) { alert('✅ Настройки сохранены!'); location.reload(); }
     else alert('Ошибка: '+(data.error||'неизвестная'));
 }
+
 function exportExcel() {
     const url = 'export_terman_excel.php?' + new URLSearchParams({
         year: <?= $year ?>,
         month: <?= $month ?>,
-        territory: <?= $territory_filter ?>
+        territory: <?= $territory_filter ?>,
+        date: '<?= $selected_date ?>'
     });
     window.open(url, '_blank');
 }
@@ -839,9 +892,14 @@ function exportPDF() {
     const url = 'export_terman_pdf.php?' + new URLSearchParams({
         year: <?= $year ?>,
         month: <?= $month ?>,
-        territory: <?= $territory_filter ?>
+        territory: <?= $territory_filter ?>,
+        date: '<?= $selected_date ?>'
     });
     window.open(url, '_blank');
+}
+
+function closeModal(id) {
+    document.getElementById(id).classList.remove('active');
 }
 document.addEventListener('keydown', e => { if(e.key==='Escape') document.querySelectorAll('.modal').forEach(m=>m.classList.remove('active')); });
 document.querySelectorAll('.modal').forEach(m=>{ m.addEventListener('click', e=>{ if(e.target===m) m.classList.remove('active'); }); });

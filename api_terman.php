@@ -54,7 +54,7 @@ if ($action === 'save_position_date') {
     exit;
 }
 
-// ── Сохранить настройки цветов ────────────────────────────
+// ── Сохранить настройки цветов (исправлено под структуру таблицы) ──
 if ($action === 'save_colors') {
     $red = (int) ($_POST['red_max'] ?? 1);
     $yellow = (int) ($_POST['yellow_max'] ?? 2);
@@ -63,8 +63,20 @@ if ($action === 'save_colors') {
         exit;
     }
     try {
-        $stmt = $pdo->prepare("INSERT OR REPLACE INTO terman_color_settings (id, red_max, yellow_max, territory_id) VALUES (1, ?, ?, NULL)");
-        $stmt->execute([$red, $yellow]);
+        // Проверяем, есть ли глобальная запись (territory_id IS NULL AND terbank_id IS NULL)
+        $stmt = $pdo->prepare("SELECT id FROM terman_color_settings WHERE territory_id IS NULL AND terbank_id IS NULL LIMIT 1");
+        $stmt->execute();
+        $existing = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if ($existing) {
+            // Обновляем существующую запись
+            $stmt = $pdo->prepare("UPDATE terman_color_settings SET red_max = ?, yellow_max = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+            $stmt->execute([$red, $yellow, $existing['id']]);
+        } else {
+            // Вставляем новую запись
+            $stmt = $pdo->prepare("INSERT INTO terman_color_settings (red_max, yellow_max, territory_id, terbank_id, updated_at) VALUES (?, ?, NULL, NULL, CURRENT_TIMESTAMP)");
+            $stmt->execute([$red, $yellow]);
+        }
         echo json_encode(['success' => true]);
     } catch (Exception $e) {
         echo json_encode(['success' => false, 'error' => $e->getMessage()]);

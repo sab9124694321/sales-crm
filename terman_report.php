@@ -361,7 +361,7 @@ foreach ($managers as $m) {
         .grand-totals td{font-weight:800;background:#ffecb3 !important;font-size:10px;}
         .edit-icon{cursor:pointer;color:#1976d2;font-size:10px;margin-left:2px;opacity:.7;}
         .edit-icon:hover{opacity:1;}
-        .comment-icon{cursor:pointer;color:#6c757d;font-size:10px;margin-left:3px;opacity:.7;}
+        .comment-icon{cursor:pointer;color:#6c757d;font-size:10px;margin-right:3px;opacity:.7;} /* теперь margin-right вместо margin-left */
         .comment-icon:hover{opacity:1;color:#0d6efd;}
         .absence-mark{background:#e0e0e0 !important;color:#555 !important;border:1px solid #ccc !important;}
         .no-data{padding:40px;text-align:center;color:#888;font-size:16px;background:#fafafa;border-radius:6px;border:1px dashed #ccc;}
@@ -387,9 +387,10 @@ foreach ($managers as $m) {
         .head-row td{background:#f3e5f5;font-weight:600;text-align:left;padding-left:8px;}
         .comment-cell{background:#f3e5f5;text-align:left;padding-left:6px;font-size:8px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
         .manager-comment-cell{background:transparent;text-align:left;padding-left:6px;font-size:8px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-        /* Стили для ячеек дня – цвета задаются через inline style, но можно добавить резервные */
         .cell-day.weekend{background:#f0f0f0 !important;color:#999 !important;}
         .absence-mark{background:#e0e0e0 !important;color:#555 !important;}
+        /* Стиль для иконки комментария слева */
+        .comment-icon-left { margin-right: 3px; }
     </style>
 </head>
 <body>
@@ -440,7 +441,7 @@ foreach ($managers as $m) {
     <?php if (empty($structure)): ?>
         <div class="no-data">😕 Нет данных</div>
     <?php else: ?>
-        <!-- Сводная таблица (с ЦС в сводке и 4 колонками в днях) -->
+        <!-- Сводная таблица (с РП в сводке и 4 колонками в днях) -->
         <h2 style="margin:20px 0 10px;font-size:18px;">📊 Сводка по ГОСБ</h2>
         <div class="table-wrap" id="summary-table">
             <table>
@@ -452,7 +453,7 @@ foreach ($managers as $m) {
                         <th>Факт месяц</th>
                         <th>RR</th>
                         <th>ВП</th>
-                        <th>ЦС</th>
+                        <th>РП</th>
                         <?php foreach ($days_reverse as $d): 
                             $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
                             $weekday_num = date('N', strtotime($date_str)) - 1;
@@ -469,7 +470,7 @@ foreach ($managers as $m) {
                             <th class="sub-col">ИНН</th>
                             <th class="sub-col">Кл</th>
                             <th class="sub-col">Кс</th>
-                            <th class="sub-col">ЦС</th>
+                            <th class="sub-col">РП</th>
                         <?php endforeach; ?>
                     </tr>
                 </thead>
@@ -561,7 +562,7 @@ foreach ($managers as $m) {
                             <th>Стаж (Г.М)</th>
                             <th>RR</th>
                             <th>ВП</th>
-                            <th>ЦС</th>
+                            <th>РП</th>
                             <?php foreach ($days_reverse as $d): 
                                 $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
                                 $weekday_num = date('N', strtotime($date_str)) - 1;
@@ -579,7 +580,7 @@ foreach ($managers as $m) {
                                 <th class="sub-col">ИНН</th>
                                 <th class="sub-col">Кл</th>
                                 <th class="sub-col">Кс</th>
-                                <th class="sub-col">ЦС</th>
+                                <th class="sub-col">РП</th>
                             <?php endforeach; ?>
                             <th></th><th></th>
                         </tr>
@@ -599,10 +600,12 @@ foreach ($managers as $m) {
                         $head_comment = getComment($pdo, $head_tabel, $comment_date, 'head');
                     ?>
                         <tr class="head-row">
+                            <!-- Иконка комментария теперь слева от имени руководителя -->
                             <td style="background:#f3e5f5;font-weight:600;text-align:left;padding-left:8px;">
-                                <?= htmlspecialchars($head_name) ?>
                                 <span class="comment-icon no-print" title="Редактировать комментарий руководителя" onclick="openCommentModal('<?= htmlspecialchars($head_tabel) ?>','<?= htmlspecialchars($head_name) ?>','head','<?= date('Y-m-d') ?>')">💬</span>
+                                <?= htmlspecialchars($head_name) ?>
                             </td>
+                            <!-- В столбце "Минипротокол" только текст комментария -->
                             <td class="comment-cell" style="background:#f3e5f5;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
                                 <?= htmlspecialchars($head_comment) ?>
                             </td>
@@ -647,18 +650,19 @@ foreach ($managers as $m) {
                             $fact = (int) ($m['fact'] ?? 0);
                             $rr   = (int) ($m['rr'] ?? 0);
                             $vp   = (int) ($m['vp'] ?? 0);
-                            $cs   = (int) ($m['target'] ?? 0); // ЦС за месяц
+                            $cs   = (int) ($m['target'] ?? 0); // РП за месяц
                             $staz = $m['staz'] ?? '000/00';
                             $manager_comment = $manager_comments[$t] ?? '';
                         ?>
                             <tr data-tabel="<?= htmlspecialchars((string)$t) ?>">
                                 <td></td>
-                                <!-- Минипротокол для менеджера -->
+                                <!-- Минипротокол для менеджера (только текст, иконка перенесена в ФИО) -->
                                 <td class="manager-comment-cell" style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
                                     <?= htmlspecialchars($manager_comment) ?>
-                                    <span class="comment-icon no-print" title="Редактировать комментарий менеджера" onclick="openCommentModal('<?= htmlspecialchars((string)$t) ?>','<?= htmlspecialchars((string)($m['full_name'] ?? '')) ?>','manager','<?= date('Y-m-d') ?>')">💬</span>
                                 </td>
                                 <td class="name-col">
+                                    <!-- Иконка комментария теперь слева от фамилии -->
+                                    <span class="comment-icon no-print" title="Редактировать комментарий менеджера" onclick="openCommentModal('<?= htmlspecialchars((string)$t) ?>','<?= htmlspecialchars((string)($m['full_name'] ?? '')) ?>','manager','<?= date('Y-m-d') ?>')">💬</span>
                                     <?= htmlspecialchars((string)($m['full_name'] ?? '')) ?>
                                     <span class="edit-icon no-print" title="Изменить дату ввода"
                                           onclick="openPositionModal('<?= htmlspecialchars((string)$t) ?>','<?= htmlspecialchars((string)($m['full_name'] ?? '')) ?>','<?= htmlspecialchars((string)((!empty($m['position_start_date'])) ? $m['position_start_date'] : ($m['created_at'] ?? ''))) ?>')">✏️</span>
@@ -741,7 +745,7 @@ foreach ($managers as $m) {
     <?php endif; ?>
 
     <div class="no-print" style="margin-top:14px;font-size:12px;color:#888;line-height:1.6;">
-        💡 <b>Как пользоваться:</b> Клик на ячейку дня → отметить/снять отсутствие. Клик на ✏️ → дата ввода в должность. 💬 у руководителя → минипротокол. 💬 у менеджера → личный комментарий (отображается в столбце «Минипротокол»). Настрой цвета → Сохранить. Excel/PDF → выгрузка.
+        💡 <b>Как пользоваться:</b> Клик на ячейку дня → отметить/снять отсутствие. Клик на ✏️ → дата ввода в должность. 💬 у руководителя (слева от ФИО) → минипротокол. 💬 у менеджера (слева от фамилии) → личный комментарий (отображается в столбце «Минипротокол»). Настрой цвета → Сохранить. Excel/PDF → выгрузка.
     </div>
 </div>
 

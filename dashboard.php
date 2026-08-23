@@ -559,7 +559,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
     <select name="filter_station" onchange="this.form.submit()">
         <option value="all" <?= $filter_station == 'all' ? 'selected' : '' ?>>Все</option>
         <option value="pirate" <?= $filter_station == 'pirate' ? 'selected' : '' ?>>Пиратская</option>
-        <option value="target" <?= $filter_station == 'target' ? 'selected' : '' ?>>Целевой список</option>
+        <option value="target" <?= $filter_station == 'target' ? 'selected' : '' ?>>Раскрытие потенциала</option>
         <option value="newreg" <?= $filter_station == 'newreg' ? 'selected' : '' ?>>Новорег</option>
     </select>
 
@@ -687,7 +687,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
                 <select id="station_reg" style="font-size:0.8rem; padding:4px;">
                     <option value="newreg">Новорег</option>
                     <option value="pirate">Пиратская</option>
-                    <option value="target">Целевой список</option>
+                    <option value="target">Раскрытие потенциала</option>
                 </select>
                 <button type="button" class="add-btn" onclick="addInn('reg')">+1</button>
             </div>
@@ -704,7 +704,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
                 <select id="station_pos" style="font-size:0.8rem; padding:4px;">
                     <option value="newreg">Новорег</option>
                     <option value="pirate">Пиратская</option>
-                    <option value="target">Целевой список</option>
+                    <option value="target">Раскрытие потенциала</option>
                 </select>
                 <button type="button" class="add-btn" onclick="addInn('pos')">+1</button>
             </div>
@@ -721,7 +721,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
                 <select id="station_smart" style="font-size:0.8rem; padding:4px;">
                     <option value="newreg">Новорег</option>
                     <option value="pirate">Пиратская</option>
-                    <option value="target">Целевой список</option>
+                    <option value="target">Раскрытие потенциала</option>
                 </select>
                 <button type="button" class="add-btn" onclick="addInn('smart')">+1</button>
             </div>
@@ -738,7 +738,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
                 <select id="station_tea" style="font-size:0.8rem; padding:4px;">
                     <option value="newreg">Новорег</option>
                     <option value="pirate">Пиратская</option>
-                    <option value="target">Целевой список</option>
+                    <option value="target">Раскрытие потенциала</option>
                 </select>
                 <button type="button" class="add-btn" onclick="addInn('tea')">+1</button>
             </div>

@@ -55,6 +55,14 @@ function calcStaz($date) {
     }
 }
 
+// ── Функция получения комментария ──────────────────────
+function getComment($pdo, $user_tabel, $date, $target_role = 'head') {
+    $stmt = $pdo->prepare("SELECT comment FROM head_comments WHERE head_tabel = ? AND comment_date = ? AND target_role = ?");
+    $stmt->execute([$user_tabel, $date, $target_role]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return $row['comment'] ?? '';
+}
+
 // ── Параметры ─────────────────────────────────────────────
 $selected_date = isset($_GET['date']) ? $_GET['date'] : date('Y-m-d', strtotime('-1 day'));
 if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $selected_date)) {
@@ -270,11 +278,29 @@ $grand_vp = $grand_plan > 0 ? round(($grand_fact / $grand_plan) * 100) : 0;
 $grand_cs = $grand_target;
 
 $days_reverse = array_reverse($display_days);
+$today_str = date('Y-m-d');
+
+// ── Подготовка комментариев ──────────────────────────────
+$head_comments = [];
+$manager_comments = [];
+foreach ($structure as $terr) {
+    foreach ($terr['heads'] as $head_name => $head_group) {
+        $head_tabel = $head_group['head_tabel'] ?? '';
+        $head_comments[$head_tabel] = getComment($pdo, $head_tabel, $today_str, 'head');
+        foreach ($head_group['managers'] as $m) {
+            $t = $m['tabel_key'] ?? '';
+            if ($t) {
+                $manager_comments[$t] = getComment($pdo, $t, $today_str, 'manager');
+            }
+        }
+    }
+}
 
 // ── Формирование Excel ──────────────────────────────────
 require_once 'vendor/autoload.php';
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
+use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 
 $spreadsheet = new Spreadsheet();
 $sheet = $spreadsheet->getActiveSheet();
@@ -284,39 +310,74 @@ $col = 1;
 
 // Вспомогательная функция для установки значения по координатам
 function setCell($sheet, $col, $row, $value) {
-    $sheet->setCellValue(\PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($col) . $row, $value);
+    $sheet->setCellValue(Coordinate::stringFromColumnIndex($col) . $row, $value);
 }
 
-// Заголовки верхнего уровня
-$headers = ['ГОСБ', 'Начальник отдела', 'План месяц', 'Факт месяц', 'RR', 'ВП', 'ЦС'];
+// ── Заголовки ─────────────────────────────────────────────
+// Первая строка: основные заголовки
+$headers = [
+    'ФИО Руководителя',
+    'Минипротокол',
+    'ФИО менеджера',
+    'Стаж (Г.М)',
+    'RR',
+    'ВП',
+    'РП'
+];
 foreach ($days_reverse as $d) {
-    $headers[] = $d;
-    $headers[] = '';
-    $headers[] = '';
-    $headers[] = '';
+    $headers[] = $d;        // под ним будут подзаголовки для 4 колонок
 }
+// Добавляем План и Факт в конец
+$headers[] = 'План';
+$headers[] = 'Факт';
 foreach ($headers as $idx => $val) {
     setCell($sheet, $idx+1, $row, $val);
 }
-// Вторая строка – подзаголовки для дней
+
+// Вторая строка: подзаголовки для дней (ИНН, Кл, Кс, РП) и пустые для остальных
 $row = 2;
-$subHeaders = ['', '', '', '', '', '', ''];
+$subHeaders = [];
+for ($i = 0; $i < 7; $i++) $subHeaders[] = ''; // для первых 7 колонок пусто
 foreach ($days_reverse as $d) {
     $subHeaders[] = 'ИНН';
     $subHeaders[] = 'Кл';
     $subHeaders[] = 'Кс';
-    $subHeaders[] = 'ЦС';
+    $subHeaders[] = 'РП';
 }
+$subHeaders[] = ''; // План
+$subHeaders[] = ''; // Факт
 foreach ($subHeaders as $idx => $val) {
     setCell($sheet, $idx+1, $row, $val);
 }
 
-// Данные
+// ── Данные ─────────────────────────────────────────────────
 $row = 3;
 foreach ($structure as $terr_id => $terr) {
-    $daily = $terr['daily_totals'] ?? array_fill_keys($display_days, ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0]);
+    // Название территории как разделитель (необязательно)
+    // Выведем как строку-заголовок с объединением ячеек
+    $startCol = 1;
+    $endCol = 7 + 4 * count($days_reverse) + 2; // общее кол-во колонок
+    $sheet->mergeCells(Coordinate::stringFromColumnIndex($startCol) . $row . ':' . Coordinate::stringFromColumnIndex($endCol) . $row);
+    setCell($sheet, $startCol, $row, '🏢 ' . $terr['name']);
+    $sheet->getStyle(Coordinate::stringFromColumnIndex($startCol) . $row)->getFont()->setBold(true);
+    $row++;
+
     foreach ($terr['heads'] as $head_name => $head_group) {
-        // Вычисляем head_daily
+        $head_tabel = $head_group['head_tabel'] ?? '';
+        $head_comment = $head_comments[$head_tabel] ?? '';
+        $head_plan = $head_group['total_plan'];
+        $head_fact = $head_group['total_fact'];
+        $head_rr   = $head_group['total_rr'];
+        $head_vp   = $head_group['total_vp'];
+        $head_cs   = $head_group['total_cs'];
+
+        // Строка руководителя
+        $col = 1;
+        setCell($sheet, $col++, $row, $head_name);
+        setCell($sheet, $col++, $row, $head_comment);
+        // остальные колонки до дней пропускаем
+        for ($i = 3; $i <= 7; $i++) setCell($sheet, $col++, $row, '');
+        // Дневные итоги для руководителя
         $head_daily = array_fill_keys($display_days, ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0]);
         foreach ($head_group['managers'] as $m) {
             $t = $m['tabel_key'];
@@ -330,33 +391,82 @@ foreach ($structure as $terr_id => $terr) {
                 $head_daily[$d]['target'] += $cnt['target'];
             }
         }
-        $col = 1;
-        setCell($sheet, $col++, $row, $terr['name']);
-        setCell($sheet, $col++, $row, $head_name);
-        setCell($sheet, $col++, $row, $head_group['total_plan']);
-        setCell($sheet, $col++, $row, $head_group['total_fact']);
-        setCell($sheet, $col++, $row, $head_group['total_rr']);
-        setCell($sheet, $col++, $row, $head_group['total_vp'] . '%');
-        setCell($sheet, $col++, $row, $head_group['total_cs']);
-
         foreach ($days_reverse as $d) {
-            $cnt = $head_daily[$d] ?? ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0];
+            $cnt = $head_daily[$d];
             setCell($sheet, $col++, $row, $cnt['total']);
             setCell($sheet, $col++, $row, $cnt['keyv']);
             setCell($sheet, $col++, $row, $cnt['kas']);
             setCell($sheet, $col++, $row, $cnt['target']);
         }
+        setCell($sheet, $col++, $row, $head_plan);
+        setCell($sheet, $col++, $row, $head_fact);
         $row++;
+
+        // Строка "ИТОГО по руководителю"
+        $col = 1;
+        setCell($sheet, $col++, $row, 'ИТОГО по ' . $head_name);
+        setCell($sheet, $col++, $row, ''); // комментарий пуст
+        for ($i = 3; $i <= 7; $i++) setCell($sheet, $col++, $row, '');
+        foreach ($days_reverse as $d) {
+            $cnt = $head_daily[$d];
+            setCell($sheet, $col++, $row, $cnt['total']);
+            setCell($sheet, $col++, $row, $cnt['keyv']);
+            setCell($sheet, $col++, $row, $cnt['kas']);
+            setCell($sheet, $col++, $row, $cnt['target']);
+        }
+        setCell($sheet, $col++, $row, $head_plan);
+        setCell($sheet, $col++, $row, $head_fact);
+        $row++;
+
+        // Строки менеджеров
+        foreach ($head_group['managers'] as $m) {
+            $t = $m['tabel_key'];
+            if (empty($t)) continue;
+            $plan = (int) ($m['plan'] ?? 0);
+            $fact = (int) ($m['fact'] ?? 0);
+            $rr   = (int) ($m['rr'] ?? 0);
+            $vp   = (int) ($m['vp'] ?? 0);
+            $cs   = (int) ($m['target'] ?? 0);
+            $staz = $m['staz'] ?? '000/00';
+            $manager_comment = $manager_comments[$t] ?? '';
+
+            $col = 1;
+            setCell($sheet, $col++, $row, ''); // ФИО руководителя пусто
+            setCell($sheet, $col++, $row, $manager_comment);
+            setCell($sheet, $col++, $row, $m['full_name'] ?? '');
+            setCell($sheet, $col++, $row, $staz);
+            setCell($sheet, $col++, $row, $rr);
+            setCell($sheet, $col++, $row, $vp . '%');
+            setCell($sheet, $col++, $row, $cs);
+
+            foreach ($days_reverse as $d) {
+                $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
+                $absent = isset($absences[$t][$date_str]) ? true : false;
+                $cnt = isset($sales[$t][$date_str]) ? $sales[$t][$date_str] : ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0];
+                if ($absent) {
+                    setCell($sheet, $col++, $row, 'Н');
+                    setCell($sheet, $col++, $row, 'Н');
+                    setCell($sheet, $col++, $row, 'Н');
+                    setCell($sheet, $col++, $row, 'Н');
+                } else {
+                    setCell($sheet, $col++, $row, $cnt['total']);
+                    setCell($sheet, $col++, $row, $cnt['keyv']);
+                    setCell($sheet, $col++, $row, $cnt['kas']);
+                    setCell($sheet, $col++, $row, $cnt['target']);
+                }
+            }
+            setCell($sheet, $col++, $row, $plan);
+            setCell($sheet, $col++, $row, $fact);
+            $row++;
+        }
     }
+
     // Итог по территории
+    $daily = $terr['daily_totals'] ?? array_fill_keys($display_days, ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0]);
     $col = 1;
     setCell($sheet, $col++, $row, 'ИТОГО по ' . $terr['name']);
     setCell($sheet, $col++, $row, '');
-    setCell($sheet, $col++, $row, $terr['total_plan']);
-    setCell($sheet, $col++, $row, $terr['total_fact']);
-    setCell($sheet, $col++, $row, $terr['total_rr']);
-    setCell($sheet, $col++, $row, $terr['total_vp'] . '%');
-    setCell($sheet, $col++, $row, $terr['total_cs']);
+    for ($i = 3; $i <= 7; $i++) setCell($sheet, $col++, $row, '');
     foreach ($days_reverse as $d) {
         $cnt = $daily[$d] ?? ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0];
         setCell($sheet, $col++, $row, $cnt['total']);
@@ -364,17 +474,16 @@ foreach ($structure as $terr_id => $terr) {
         setCell($sheet, $col++, $row, $cnt['kas']);
         setCell($sheet, $col++, $row, $cnt['target']);
     }
+    setCell($sheet, $col++, $row, $terr['total_plan']);
+    setCell($sheet, $col++, $row, $terr['total_fact']);
     $row++;
 }
+
 // Гранд-итог
 $col = 1;
 setCell($sheet, $col++, $row, 'ВСЕГО');
 setCell($sheet, $col++, $row, '');
-setCell($sheet, $col++, $row, $grand_plan);
-setCell($sheet, $col++, $row, $grand_fact);
-setCell($sheet, $col++, $row, $grand_rr);
-setCell($sheet, $col++, $row, $grand_vp . '%');
-setCell($sheet, $col++, $row, $grand_cs);
+for ($i = 3; $i <= 7; $i++) setCell($sheet, $col++, $row, '');
 foreach ($days_reverse as $d) {
     $cnt = $grand_daily[$d] ?? ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0];
     setCell($sheet, $col++, $row, $cnt['total']);
@@ -382,14 +491,18 @@ foreach ($days_reverse as $d) {
     setCell($sheet, $col++, $row, $cnt['kas']);
     setCell($sheet, $col++, $row, $cnt['target']);
 }
+setCell($sheet, $col++, $row, $grand_plan);
+setCell($sheet, $col++, $row, $grand_fact);
 
-// Автоширина
-foreach (range(1, 7 + 4 * count($days_reverse)) as $colIdx) {
+// ── Автоширина ─────────────────────────────────────────────
+$totalCols = 7 + 4 * count($days_reverse) + 2;
+foreach (range(1, $totalCols) as $colIdx) {
     $sheet->getColumnDimensionByColumn($colIdx)->setAutoSize(true);
 }
 
+// ── Вывод ──────────────────────────────────────────────────
 $writer = new Xlsx($spreadsheet);
 header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-header('Content-Disposition: attachment; filename="terman_report_'.$year.'_'.$month.'.xlsx"');
+header('Content-Disposition: attachment; filename="terman_report_detailed_'.$year.'_'.$month.'.xlsx"');
 $writer->save('php://output');
 exit;

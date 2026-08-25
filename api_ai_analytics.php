@@ -2,9 +2,8 @@
 session_start();
 header('Content-Type: application/json; charset=utf-8');
 
-// Показываем ошибки для отладки
 error_reporting(E_ALL);
-ini_set('display_errors', 0); // не показывать на экран, но писать в лог
+ini_set('display_errors', 0);
 
 if (!isset($_SESSION['user_id'])) {
     echo json_encode(['error' => 'Требуется авторизация']);
@@ -29,9 +28,7 @@ if (empty($question)) {
 $role = $_SESSION['role'];
 $userId = $_SESSION['user_id'];
 
-// --------------------------------------------------------------------
-// 1. Токен GigaChat (с обработкой ошибки 401)
-// --------------------------------------------------------------------
+// --- 1. Токен GigaChat ---
 $accessToken = $_SESSION['gigachat_token'] ?? null;
 if (!$accessToken) {
     $accessToken = getAccessToken();
@@ -43,29 +40,25 @@ if (!$accessToken) {
     }
 }
 
-// --------------------------------------------------------------------
-// 2. Список менеджеров
-// --------------------------------------------------------------------
+// --- 2. Список менеджеров ---
 $subordinates = getSubordinatesByLevel($pdo, $role, $userId, $level, $selectedId);
 if (empty($subordinates)) {
     echo json_encode(['response' => 'Нет данных для анализа.']);
     exit;
 }
 
-// --------------------------------------------------------------------
-// 3. Подготовка данных
-// --------------------------------------------------------------------
+// --- 3. Подготовка данных (daily_reports + inn_records + plans) ---
 $allMetrics = [
-    'calls'          => 'Звонки',
-    'calls_answered' => 'Дозвоны',
-    'meetings'       => 'Встречи',
-    'contracts'      => 'Договоры',
-    'registrations'  => 'ТЭ',
-    'smart_cash'     => 'Смарт-кассы',
-    'pos_systems'    => 'ПОС-системы',
-    'inn_leads'      => 'ИНН чаевые',
-    'teams'          => 'Команды',
-    'turnover'       => 'Оборот чаевых',
+    'calls'          => ['label' => 'Звонки', 'icon' => '📞', 'source' => 'daily'],
+    'calls_answered' => ['label' => 'Дозвоны', 'icon' => '✅', 'source' => 'daily'],
+    'meetings'       => ['label' => 'Встречи', 'icon' => '🤝', 'source' => 'daily'],
+    'contracts'      => ['label' => 'Договоры', 'icon' => '📄', 'source' => 'daily'],
+    'registrations'  => ['label' => 'ТЭ (торговые эквайринговые терминалы)', 'icon' => '📝', 'source' => 'inn'],
+    'smart_cash'     => ['label' => 'Смарт-кассы (смарт-терминалы)', 'icon' => '💳', 'source' => 'inn'],
+    'pos_systems'    => ['label' => 'ПОС-системы (программно-аппаратные комплексы)', 'icon' => '🖥️', 'source' => 'inn'],
+    'inn_leads'      => ['label' => 'ИНН чаевые (кол-во зарегистрированных команд официантов)', 'icon' => '🍵', 'source' => 'inn'],
+    'teams'          => ['label' => 'Команды (созданные группы)', 'icon' => '👥', 'source' => 'daily'],
+    'turnover'       => ['label' => 'Оборот чаевых (сумма чаевых от гостей в рублях)', 'icon' => '💰', 'source' => 'daily'],
 ];
 
 $reportLines = [];
@@ -74,26 +67,42 @@ foreach ($subordinates as $sub) {
     if (!empty($sub['head_name'])) $line .= " (нач.: {$sub['head_name']})";
     if (!empty($sub['territory_name'])) $line .= " [{$sub['territory_name']}]";
 
-    $stmt = $pdo->prepare("SELECT COALESCE(SUM(calls),0) as calls, COALESCE(SUM(calls_answered),0) as calls_answered,
+    // Данные из daily_reports
+    $stmtDaily = $pdo->prepare("SELECT COALESCE(SUM(calls),0) as calls, COALESCE(SUM(calls_answered),0) as calls_answered,
         COALESCE(SUM(meetings),0) as meetings, COALESCE(SUM(contracts),0) as contracts,
-        COALESCE(SUM(registrations),0) as registrations, COALESCE(SUM(smart_cash),0) as smart_cash,
-        COALESCE(SUM(pos_systems),0) as pos_systems, COALESCE(SUM(inn_leads),0) as inn_leads,
         COALESCE(SUM(teams),0) as teams, COALESCE(SUM(turnover),0) as turnover
-        FROM daily_reports WHERE tabel_number = ? AND strftime('%Y-%m', report_date) = ?");
-    $stmt->execute([$sub['tabel_number'], $selectedMonth]);
-    $metrics = $stmt->fetch();
+        FROM daily_reports WHERE user_id = ? AND strftime('%Y-%m', report_date) = ?");
+    $stmtDaily->execute([$sub['id'], $selectedMonth]);
+    $metricsDaily = $stmtDaily->fetch();
 
+    // Данные из inn_records
+    $stmtInn = $pdo->prepare("SELECT 
+        SUM(CASE WHEN product = 'ТЭ' THEN 1 ELSE 0 END) as registrations,
+        SUM(CASE WHEN product = 'Смарт' THEN 1 ELSE 0 END) as smart_cash,
+        SUM(CASE WHEN product = 'ПОС' THEN 1 ELSE 0 END) as pos_systems,
+        SUM(CASE WHEN product = 'Чаевые' THEN 1 ELSE 0 END) as inn_leads
+        FROM inn_records 
+        WHERE employee_tabel = ? AND DATE(sale_date) BETWEEN ? AND ?");
+    $monthStart = date('Y-m-01', strtotime($selectedDate));
+    $monthEnd = date('Y-m-t', strtotime($selectedDate));
+    $stmtInn->execute([$sub['tabel_number'], $monthStart, $monthEnd]);
+    $metricsInn = $stmtInn->fetch();
+
+    // Объединяем
+    $metrics = array_merge($metricsDaily, $metricsInn);
+
+    // Планы
     $planStmt = $pdo->prepare("SELECT * FROM plans WHERE tabel_number = ? AND period = ?");
     $planStmt->execute([$sub['tabel_number'], $selectedMonth]);
     $plan = $planStmt->fetch();
 
     $metricParts = [];
-    foreach ($allMetrics as $key => $label) {
+    foreach ($allMetrics as $key => $info) {
         $factVal = $metrics[$key] ?? 0;
         $planKey = $key . '_plan';
         $planVal = $plan[$planKey] ?? 0;
         $pct = $planVal > 0 ? round(($factVal / $planVal) * 100) : 0;
-        $metricParts[] = "$label: $factVal / план $planVal ($pct%)";
+        $metricParts[] = "{$info['icon']} {$info['label']}: $factVal / план $planVal ($pct%)";
     }
     $line .= "\n  " . implode(" | ", $metricParts);
     $reportLines[] = $line;
@@ -101,17 +110,29 @@ foreach ($subordinates as $sub) {
 
 $fullReport = implode("\n\n", $reportLines);
 
-// --------------------------------------------------------------------
-// 4. Запрос к GigaChat с повторной авторизацией при 401
-// --------------------------------------------------------------------
-$prompt = "Ты — AI-аналитик CRM. Вот полный список менеджеров с их показателями за месяц:\n\n$fullReport\n\n";
-$prompt .= "Ответь на вопрос пользователя: «$question».\n";
-$prompt .= "При ответе обязательно используй имена менеджеров из списка и конкретные цифры. Если нужно сравнить — сравнивай по плану или между сотрудниками. Не придумывай данные, бери только из предоставленного списка.";
+if (empty($fullReport)) {
+    echo json_encode(['response' => 'Нет данных за выбранный месяц.']);
+    exit;
+}
 
+// Логирование
+file_put_contents(__DIR__ . '/ai_debug.log', date('Y-m-d H:i:s') . "\n" . $fullReport . "\n---\n", FILE_APPEND);
+
+// --- 4. Промпт ---
+$prompt = "Ты — точный ассистент. Отвечай СТРОГО на вопрос пользователя. Не делай общий анализ и не называй всех менеджеров подряд.\n";
+$prompt .= "Данные за месяц (факт / план / процент выполнения):\n" . $fullReport . "\n\n";
+$prompt .= "Вопрос пользователя: $question\n";
+$prompt .= "Правила ответа:\n";
+$prompt .= "1. Если спрашивают про конкретного менеджера, назови только его цифры.\n";
+$prompt .= "2. Планы в данных РЕАЛЬНЫЕ. Если тебя просят сравнить выполнение плана или посчитать процент, используй эти данные.\n";
+$prompt .= "3. КРИТИЧЕСКИ ВАЖНО: '🍵 ИНН чаевые' — это количество команд (штуки), а '💰 Оборот' — это сумма в рублях. Никогда не путай эти колонки.\n";
+$prompt .= "4. ЗАПРЕЩЕНО использовать Markdown (символы *, #, _). Отвечай только обычным текстом.";
+
+// --- 5. Запрос к GigaChat ---
 $result = callGigaChatWithRetry($prompt, $accessToken);
 
 if ($result['success']) {
-    echo json_encode(['response' => $result['response']]);
+    echo json_encode(['response' => strip_markdown($result['response'])]);
 } else {
     echo json_encode([
         'error' => 'Ошибка GigaChat: ' . $result['error'],
@@ -119,9 +140,17 @@ if ($result['success']) {
     ]);
 }
 
-// --------------------------------------------------------------------
-// Функции
-// --------------------------------------------------------------------
+// --- Функции ---
+
+function strip_markdown($text) {
+    $text = preg_replace('/^#{1,6}\s+/m', '', $text);
+    $text = preg_replace('/\*\*(.*?)\*\*/', '$1', $text);
+    $text = preg_replace('/__(.*?)__/', '$1', $text);
+    $text = preg_replace('/\*(.*?)\*/', '$1', $text);
+    $text = preg_replace('/_(.*?)_/', '$1', $text);
+    return trim($text);
+}
+
 function getAccessToken(): ?string {
     $authBase64 = GIGACHAT_AUTH;
     $rquid = sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
@@ -149,7 +178,6 @@ function getAccessToken(): ?string {
         return $json['access_token'] ?? null;
     }
     
-    // Логируем ошибку
     file_put_contents(__DIR__ . '/gigachat_errors.log', 
         date('Y-m-d H:i:s') . " OAuth error HTTP $httpCode: $response (curl error: $error)\n", 
         FILE_APPEND);
@@ -159,7 +187,6 @@ function getAccessToken(): ?string {
 function callGigaChatWithRetry(string $prompt, string &$accessToken): array {
     $response = callGigaChat($prompt, $accessToken);
     if ($response['http_code'] === 401) {
-        // Токен истек, получаем новый
         $newToken = getAccessToken();
         if ($newToken) {
             $_SESSION['gigachat_token'] = $newToken;
@@ -174,7 +201,6 @@ function callGigaChatWithRetry(string $prompt, string &$accessToken): array {
         return ['success' => true, 'response' => $response['body']];
     }
     
-    // Любая другая ошибка
     return [
         'success' => false,
         'error' => "HTTP {$response['http_code']}",
@@ -186,10 +212,11 @@ function callGigaChat(string $prompt, string $accessToken): array {
     $data = [
         'model' => 'GigaChat',
         'messages' => [
+            ['role' => 'system', 'content' => 'Ты — строгий ассистент по работе с таблицами. Никогда не делай общие выводы или отчеты, если об этом не просят. Отвечай простым текстом без Markdown. Используй только данные из запроса.'],
             ['role' => 'user', 'content' => $prompt]
         ],
-        'temperature' => 0.2,
-        'max_tokens' => 800,
+        'temperature' => 0.1,
+        'max_tokens' => 1000,
     ];
 
     $ch = curl_init('https://gigachat.devices.sberbank.ru/api/v1/chat/completions');
@@ -214,8 +241,10 @@ function callGigaChat(string $prompt, string $accessToken): array {
     return ['http_code' => $httpCode, 'body' => $text];
 }
 
+// ==========================================
+// ИСПРАВЛЕННАЯ ФУНКЦИЯ ДЛЯ РОЛИ TERMAN
+// ==========================================
 function getSubordinatesByLevel(PDO $pdo, string $role, int $userId, string $level, int $selectedId): array {
-    // ... (без изменений, как в предыдущей версии)
     if ($role === 'admin') {
         $stmt = $pdo->query("SELECT u.*, h.full_name as head_name, t.name as territory_name 
             FROM users u 
@@ -224,6 +253,18 @@ function getSubordinatesByLevel(PDO $pdo, string $role, int $userId, string $lev
             WHERE u.role = 'manager' AND u.is_active = 1");
         return $stmt->fetchAll();
     } elseif ($role === 'terman') {
+        // Если термен в корне - возвращаем всех менеджеров всех его территорий
+        if ($level === 'root') {
+            $stmt = $pdo->prepare("SELECT u.*, h.full_name as head_name, t.name as territory_name 
+                FROM users u 
+                JOIN territory_managers tm ON u.territory_id = tm.territory_id 
+                LEFT JOIN users h ON u.head_tabel = h.tabel_number 
+                LEFT JOIN territories t ON u.territory_id = t.id 
+                WHERE tm.manager_id = ? AND u.role = 'manager' AND u.is_active = 1 ORDER BY u.full_name");
+            $stmt->execute([$userId]);
+            return $stmt->fetchAll();
+        }
+        // Если термен смотрит конкретную территорию
         if ($level === 'territory' && $selectedId > 0) {
             $stmt = $pdo->prepare("SELECT u.*, h.full_name as head_name, t.name as territory_name 
                 FROM users u 

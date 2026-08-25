@@ -54,7 +54,7 @@ if ($action === 'save_position_date') {
     exit;
 }
 
-// ── Сохранить настройки цветов (исправлено под структуру таблицы) ──
+// ── Сохранить настройки цветов ──────────────────────────
 if ($action === 'save_colors') {
     $red = (int) ($_POST['red_max'] ?? 1);
     $yellow = (int) ($_POST['yellow_max'] ?? 2);
@@ -63,17 +63,14 @@ if ($action === 'save_colors') {
         exit;
     }
     try {
-        // Проверяем, есть ли глобальная запись (territory_id IS NULL AND terbank_id IS NULL)
         $stmt = $pdo->prepare("SELECT id FROM terman_color_settings WHERE territory_id IS NULL AND terbank_id IS NULL LIMIT 1");
         $stmt->execute();
         $existing = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if ($existing) {
-            // Обновляем существующую запись
             $stmt = $pdo->prepare("UPDATE terman_color_settings SET red_max = ?, yellow_max = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
             $stmt->execute([$red, $yellow, $existing['id']]);
         } else {
-            // Вставляем новую запись
             $stmt = $pdo->prepare("INSERT INTO terman_color_settings (red_max, yellow_max, territory_id, terbank_id, updated_at) VALUES (?, ?, NULL, NULL, CURRENT_TIMESTAMP)");
             $stmt->execute([$red, $yellow]);
         }
@@ -84,7 +81,7 @@ if ($action === 'save_colors') {
     exit;
 }
 
-// ── Получить комментарий (для head или manager) ──────────
+// ── Получить комментарий ──────────────────────────────────
 if ($action === 'get_comment') {
     $user_tabel = trim($_GET['user_tabel'] ?? '');
     $date = trim($_GET['date'] ?? '');
@@ -104,7 +101,7 @@ if ($action === 'get_comment') {
     exit;
 }
 
-// ── Сохранить комментарий (для head или manager) ──────────
+// ── Сохранить комментарий (с защитой от пустого поля) ─────
 if ($action === 'save_comment') {
     $user_tabel = trim($_POST['user_tabel'] ?? '');
     $date = trim($_POST['date'] ?? '');
@@ -115,6 +112,13 @@ if ($action === 'save_comment') {
         echo json_encode(['success' => false, 'error' => 'Не хватает данных']);
         exit;
     }
+
+    // ВАЖНО: если комментарий пустой, НЕ перезаписываем существующий (чтобы не пропадал)
+    if (empty($comment)) {
+        echo json_encode(['success' => true, 'message' => 'Пустой комментарий не сохранен, старая запись не тронута']);
+        exit;
+    }
+
     try {
         $stmt = $pdo->prepare("INSERT OR REPLACE INTO head_comments (head_tabel, comment_date, comment, created_by, created_at, target_role) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)");
         $stmt->execute([$user_tabel, $date, $comment, $created_by, $role]);

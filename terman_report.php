@@ -10,11 +10,11 @@ $user_id = $_SESSION['user_id'];
 $allowed = ['head', 'territory_head', 'admin', 'terman'];
 if (!in_array($role, $allowed)) die('🚫 Доступ запрещён.');
 
-// ── Функция получения показателей за день ──────────────
+// ── Функция получения показателей за день (логика: сумма ТЭ+Смарт+ПОС) ──
 function getProductCounts($pdo, $tabel, $date_from, $date_to) {
     $sql = "
         SELECT
-            COUNT(*) AS total,
+            SUM(CASE WHEN product IN ('ТЭ', 'Смарт', 'ПОС') THEN 1 ELSE 0 END) AS total,
             SUM(CASE WHEN is_key = 1 THEN 1 ELSE 0 END) AS keyv,
             SUM(CASE WHEN product IN ('ПОС', 'Смарт') THEN 1 ELSE 0 END) AS kas,
             SUM(CASE WHEN station_type = 'target' THEN 1 ELSE 0 END) AS target
@@ -26,22 +26,21 @@ function getProductCounts($pdo, $tabel, $date_from, $date_to) {
     $stmt->execute([$tabel, $date_from, $date_to]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
     return [
-        'total'  => (int) $row['total'],
-        'keyv'   => (int) $row['keyv'],
-        'kas'    => (int) $row['kas'],
-        'target' => (int) $row['target']
+        'total'  => (int) ($row['total'] ?? 0), // Теперь это сумма ТЭ+Смарт+ПОС
+        'keyv'   => (int) ($row['keyv'] ?? 0),
+        'kas'    => (int) ($row['kas'] ?? 0),
+        'target' => (int) ($row['target'] ?? 0)
     ];
 }
 
-// ── Универсальная функция получения комментария (по роли) ──
-function getComment($pdo, $user_tabel, $date, $target_role = 'head') {
-    $stmt = $pdo->prepare("SELECT comment FROM head_comments WHERE head_tabel = ? AND comment_date = ? AND target_role = ?");
-    $stmt->execute([$user_tabel, $date, $target_role]);
-    $row = $stmt->fetch(PDO::FETCH_ASSOC);
-    return $row['comment'] ?? '';
+// ── Функция получения ВСЕХ комментариев (по роли) ──
+function getAllComments($pdo, $user_tabel, $target_role) {
+    $stmt = $pdo->prepare("SELECT comment, comment_date FROM head_comments WHERE head_tabel = ? AND target_role = ? ORDER BY comment_date DESC");
+    $stmt->execute([$user_tabel, $target_role]);
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
 
-// ── Функция подсчёта рабочих дней ──────────────────────
+// ── Функция подсчёта рабочих дней ──
 function countWorkingDays($start, $end) {
     $start = new DateTime($start);
     $end = new DateTime($end);
@@ -56,7 +55,7 @@ function countWorkingDays($start, $end) {
     return $days;
 }
 
-// ── Определяем параметры из GET (дата) ──────────────────
+// ── Определяем параметры из GET (дата) ──
 $selected_date = isset($_GET['date']) ? $_GET['date'] : date('Y-m-d', strtotime('-1 day'));
 if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $selected_date)) {
     $selected_date = date('Y-m-d', strtotime('-1 day'));
@@ -88,11 +87,11 @@ $period = sprintf('%04d-%02d', $year, $month);
 $date_from = sprintf('%04d-%02d-01', $year, $month);
 $date_to   = sprintf('%04d-%02d-%02d', $year, $month, $days_in_month);
 
-// ── Фильтр по территории ──────────────────────────────────
+// ── Фильтр по территории ──
 $territory_filter = isset($_GET['territory']) ? (int) $_GET['territory'] : 0;
 $territories = $pdo->query("SELECT id, name FROM territories ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
 
-// ── Получение менеджеров ──────────────────────────────────
+// ── Получение менеджеров ──
 $sql = "
     SELECT u.tabel_number, u.full_name, u.territory_id, u.head_tabel,
            u.position_start_date, u.created_at,
@@ -109,7 +108,7 @@ $sql .= " ORDER BY t.name, h.full_name, u.full_name";
 $managers = $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
 if (empty($managers)) die('Нет активных менеджеров');
 
-// ── Планы (contracts_plan) ──────────────────────────────
+// ── Планы (contracts_plan) ──
 $plans = [];
 $stmt = $pdo->prepare("SELECT tabel_number, contracts_plan FROM plans WHERE period = ?");
 $stmt->execute([$period]);
@@ -118,8 +117,8 @@ while ($r = $stmt->fetch()) {
     $plans[$t] = (int)$r['contracts_plan'];
 }
 
-// ── Сбор продаж, отсутствий и целевых ──────────────────
-$sales = []; // структура: $sales[tabel][date] = ['total'=>, 'keyv'=>, 'kas'=>, 'target'=>]
+// ── Сбор продаж, отсутствий и целевых ──
+$sales = [];
 $absences = [];
 foreach ($managers as $m) {
     $t = trim((string)$m['tabel_number']);
@@ -138,7 +137,7 @@ foreach ($managers as $m) {
     $absences[$t] = array_fill_keys($abs, true);
 }
 
-// ── Факт за месяц и целевые за месяц ──────────────────
+// ── Факт за месяц и целевые за месяц ──
 $fact_month = [];
 $target_month = [];
 foreach ($sales as $t => $days) {
@@ -152,7 +151,7 @@ foreach ($sales as $t => $days) {
     $target_month[$t] = $target;
 }
 
-// ── Настройки цветов (для дальтоников) ────────────────
+// ── Настройки цветов ──
 $colors = $pdo->query("SELECT red_max, yellow_max FROM terman_color_settings WHERE territory_id IS NULL ORDER BY id DESC LIMIT 1")->fetch();
 if (!$colors) $colors = ['red_max' => 1, 'yellow_max' => 2];
 
@@ -168,23 +167,15 @@ function calcStaz($date) {
     }
 }
 
-// Новая цветовая схема для дальтоников
 function getDayColor($cnt, $colors) {
     $red = (int) ($colors['red_max'] ?? 1);
     $yellow = (int) ($colors['yellow_max'] ?? 2);
-    if ($cnt <= $red) {
-        // Ярко-красный, текст тёмный
-        return ['bg' => '#ff6b6b', 'txt' => '#4a0000'];
-    }
-    if ($cnt <= $yellow) {
-        // Ярко-жёлтый, текст тёмный
-        return ['bg' => '#ffd93d', 'txt' => '#5a3e00'];
-    }
-    // Ярко-зелёный, текст тёмный
+    if ($cnt <= $red) return ['bg' => '#ff6b6b', 'txt' => '#4a0000'];
+    if ($cnt <= $yellow) return ['bg' => '#ffd93d', 'txt' => '#5a3e00'];
     return ['bg' => '#51cf66', 'txt' => '#003d00'];
 }
 
-// ── ГРУППИРОВКА ────────────────────────────────────────────
+// ── ГРУППИРОВКА ──
 $structure = [];
 foreach ($managers as $m) {
     $terr_id   = (int) ($m['territory_id'] ?? 0);
@@ -221,7 +212,7 @@ foreach ($managers as $m) {
     $structure[$terr_id]['heads'][$head_name]['managers'][] = array_merge($m, ['tabel_key' => $tabel_key]);
 }
 
-// ── ВЫЧИСЛЕНИЕ ИТОГОВ ──────────────────────────────────────
+// ── ВЫЧИСЛЕНИЕ ИТОГОВ ──
 $grand_plan = 0;
 $grand_fact = 0;
 $grand_target = 0;
@@ -310,12 +301,11 @@ $grand_cs = $grand_target;
 $days_reverse = array_reverse($display_days);
 $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 
-// ── Подготовка комментариев на сегодня ──
-$today_str = date('Y-m-d');
+// ── Подготовка ВСЕХ комментариев (для менеджеров) ──
 $manager_comments = [];
 foreach ($managers as $m) {
     $t = trim((string)$m['tabel_number']);
-    $manager_comments[$t] = getComment($pdo, $t, $today_str, 'manager');
+    $manager_comments[$t] = getAllComments($pdo, $t, 'manager');
 }
 ?>
 <!DOCTYPE html>
@@ -325,7 +315,6 @@ foreach ($managers as $m) {
     <title>📋 Отчёт термена — <?= $selected_date ?></title>
     <link rel="stylesheet" href="style.css">
     <style>
-        /* Базовые стили (адаптированы под 4 столбца в днях) */
         body{font-family:system-ui,sans-serif;background:#f5f5f5;padding:20px;margin:0;}
         .container{max-width:100%;margin:0 auto;background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.1);}
         .nav{display:flex;align-items:center;padding:12px 20px;background:linear-gradient(135deg,#1a1a2e,#16213e);color:#fff;border-radius:16px;margin-bottom:20px;gap:12px;flex-wrap:wrap;}
@@ -361,7 +350,7 @@ foreach ($managers as $m) {
         .grand-totals td{font-weight:800;background:#ffecb3 !important;font-size:10px;}
         .edit-icon{cursor:pointer;color:#1976d2;font-size:10px;margin-left:2px;opacity:.7;}
         .edit-icon:hover{opacity:1;}
-        .comment-icon{cursor:pointer;color:#6c757d;font-size:10px;margin-right:3px;opacity:.7;} /* теперь margin-right вместо margin-left */
+        .comment-icon{cursor:pointer;color:#6c757d;font-size:10px;margin-right:3px;opacity:.7;}
         .comment-icon:hover{opacity:1;color:#0d6efd;}
         .absence-mark{background:#e0e0e0 !important;color:#555 !important;border:1px solid #ccc !important;}
         .no-data{padding:40px;text-align:center;color:#888;font-size:16px;background:#fafafa;border-radius:6px;border:1px dashed #ccc;}
@@ -385,12 +374,10 @@ foreach ($managers as $m) {
         .day-subheader th{background:#e3f2fd;font-weight:400;font-size:7px;padding:2px 1px;}
         .sub-col{min-width:15px;}
         .head-row td{background:#f3e5f5;font-weight:600;text-align:left;padding-left:8px;}
-        .comment-cell{background:#f3e5f5;text-align:left;padding-left:6px;font-size:8px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-        .manager-comment-cell{background:transparent;text-align:left;padding-left:6px;font-size:8px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+        .comment-cell{background:#f3e5f5;text-align:left;padding-left:6px;font-size:8px;max-width:200px;word-wrap:break-word;white-space:normal;}
+        .manager-comment-cell{background:transparent;text-align:left;padding-left:6px;font-size:8px;max-width:200px;word-wrap:break-word;white-space:normal;}
         .cell-day.weekend{background:#f0f0f0 !important;color:#999 !important;}
         .absence-mark{background:#e0e0e0 !important;color:#555 !important;}
-        /* Стиль для иконки комментария слева */
-        .comment-icon-left { margin-right: 3px; }
     </style>
 </head>
 <body>
@@ -441,7 +428,7 @@ foreach ($managers as $m) {
     <?php if (empty($structure)): ?>
         <div class="no-data">😕 Нет данных</div>
     <?php else: ?>
-        <!-- Сводная таблица (с РП в сводке и 4 колонками в днях) -->
+        <!-- Сводная таблица -->
         <h2 style="margin:20px 0 10px;font-size:18px;">📊 Сводка по ГОСБ</h2>
         <div class="table-wrap" id="summary-table">
             <table>
@@ -587,7 +574,7 @@ foreach ($managers as $m) {
                     </thead>
                     <tbody>
                     <?php
-                    $total_cols = 11 + 4 * count($display_days); // 7 фикс + 4*дней + план+факт
+                    $total_cols = 11 + 4 * count($display_days); 
                     foreach ($terr['heads'] as $head_name => $head_group):
                         $managers_list = $head_group['managers'] ?? [];
                         $head_tabel = $head_group['head_tabel'] ?? '';
@@ -596,18 +583,19 @@ foreach ($managers as $m) {
                         $head_rr   = $head_group['total_rr'] ?? 0;
                         $head_vp   = $head_group['total_vp'] ?? 0;
                         $head_cs   = $head_group['total_cs'] ?? 0;
-                        $comment_date = date('Y-m-d');
-                        $head_comment = getComment($pdo, $head_tabel, $comment_date, 'head');
+                        $head_comments = getAllComments($pdo, $head_tabel, 'head');
                     ?>
                         <tr class="head-row">
-                            <!-- Иконка комментария теперь слева от имени руководителя -->
                             <td style="background:#f3e5f5;font-weight:600;text-align:left;padding-left:8px;">
-                                <span class="comment-icon no-print" title="Редактировать комментарий руководителя" onclick="openCommentModal('<?= htmlspecialchars($head_tabel) ?>','<?= htmlspecialchars($head_name) ?>','head','<?= date('Y-m-d') ?>')">💬</span>
+                                <span class="comment-icon no-print" title="Редактировать комментарий руководителя" onclick="openCommentModal('<?= htmlspecialchars($head_tabel) ?>','<?= htmlspecialchars($head_name) ?>','head','<?= $selected_date ?>')">💬</span>
                                 <?= htmlspecialchars($head_name) ?>
                             </td>
-                            <!-- В столбце "Минипротокол" только текст комментария -->
-                            <td class="comment-cell" style="background:#f3e5f5;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                                <?= htmlspecialchars($head_comment) ?>
+                            <td class="comment-cell" style="background:#f3e5f5;">
+                                <?php if(empty($head_comments)): ?>—<?php else: ?>
+                                    <?php foreach ($head_comments as $c): ?>
+                                        <div><?= date('d.m.Y', strtotime($c['comment_date'])) ?>: <?= htmlspecialchars($c['comment']) ?></div>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
                             </td>
                             <td colspan="<?= $total_cols - 2 ?>" style="background:#f3e5f5;"></td>
                         </tr>
@@ -650,19 +638,21 @@ foreach ($managers as $m) {
                             $fact = (int) ($m['fact'] ?? 0);
                             $rr   = (int) ($m['rr'] ?? 0);
                             $vp   = (int) ($m['vp'] ?? 0);
-                            $cs   = (int) ($m['target'] ?? 0); // РП за месяц
+                            $cs   = (int) ($m['target'] ?? 0); 
                             $staz = $m['staz'] ?? '000/00';
-                            $manager_comment = $manager_comments[$t] ?? '';
+                            $manager_comments_list = $manager_comments[$t] ?? [];
                         ?>
                             <tr data-tabel="<?= htmlspecialchars((string)$t) ?>">
                                 <td></td>
-                                <!-- Минипротокол для менеджера (только текст, иконка перенесена в ФИО) -->
-                                <td class="manager-comment-cell" style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                                    <?= htmlspecialchars($manager_comment) ?>
+                                <td class="manager-comment-cell">
+                                    <?php if(empty($manager_comments_list)): ?>—<?php else: ?>
+                                        <?php foreach ($manager_comments_list as $c): ?>
+                                            <div><?= date('d.m.Y', strtotime($c['comment_date'])) ?>: <?= htmlspecialchars($c['comment']) ?></div>
+                                        <?php endforeach; ?>
+                                    <?php endif; ?>
                                 </td>
                                 <td class="name-col">
-                                    <!-- Иконка комментария теперь слева от фамилии -->
-                                    <span class="comment-icon no-print" title="Редактировать комментарий менеджера" onclick="openCommentModal('<?= htmlspecialchars((string)$t) ?>','<?= htmlspecialchars((string)($m['full_name'] ?? '')) ?>','manager','<?= date('Y-m-d') ?>')">💬</span>
+                                    <span class="comment-icon no-print" title="Редактировать комментарий менеджера" onclick="openCommentModal('<?= htmlspecialchars((string)$t) ?>','<?= htmlspecialchars((string)($m['full_name'] ?? '')) ?>','manager','<?= $selected_date ?>')">💬</span>
                                     <?= htmlspecialchars((string)($m['full_name'] ?? '')) ?>
                                     <span class="edit-icon no-print" title="Изменить дату ввода"
                                           onclick="openPositionModal('<?= htmlspecialchars((string)$t) ?>','<?= htmlspecialchars((string)($m['full_name'] ?? '')) ?>','<?= htmlspecialchars((string)((!empty($m['position_start_date'])) ? $m['position_start_date'] : ($m['created_at'] ?? ''))) ?>')">✏️</span>
@@ -676,7 +666,7 @@ foreach ($managers as $m) {
                                     $is_weekend = date('N', strtotime($date_str)) >= 6;
                                     $absent = isset($absences[$t][$date_str]) ? true : false;
                                     $cnt = isset($sales[$t][$date_str]) ? $sales[$t][$date_str] : ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0];
-                                    $total = $cnt['total'];
+                                    $total_products = $cnt['total'];
                                     $keyv  = $cnt['keyv'];
                                     $kas   = $cnt['kas'];
                                     $target = $cnt['target'];
@@ -690,11 +680,11 @@ foreach ($managers as $m) {
                                         $display_target = 'Н';
                                         $style = '';
                                     } else {
-                                        $display_total = $total;
+                                        $display_total = $total_products;
                                         $display_keyv  = $keyv;
                                         $display_kas   = $kas;
                                         $display_target = $target;
-                                        $c = getDayColor($total, $colors);
+                                        $c = getDayColor($total_products, $colors);
                                         $style = "background:{$c['bg']};color:{$c['txt']}";
                                     }
                                 ?>
@@ -813,6 +803,13 @@ async function saveComment() {
     const date = document.getElementById('commentDate').value;
     const comment = document.getElementById('commentText').value;
     if (!currentUserTabel || !date) { alert('Не хватает данных'); return; }
+    
+    // Не сохраняем пустые комментарии, чтобы не затереть старые
+    if (!comment.trim()) {
+        alert('⚠️ Комментарий пустой, сохранение отменено, чтобы не удалить старую запись.');
+        return;
+    }
+
     const res = await fetch('api_terman.php', {
         method:'POST',
         headers:{'Content-Type':'application/x-www-form-urlencoded'},

@@ -5,19 +5,16 @@ $role=$_SESSION['role'];
 if(!in_array($role,['admin','terman','territory_head','head'])){header('Location:dashboard.php');exit;}
 require_once 'db.php';
 
-// --- Выбор периода и навигация ---
 $selected_date = $_GET['date'] ?? date('Y-m-d');
 $selected_month = date('Y-m', strtotime($selected_date));
 $level = $_GET['level'] ?? 'root';
 $selected_id = $_GET['id'] ?? 0;
 
-// Параметры для расчётов (как в dashboard)
 $work_days_total = 22;
 $current_day = date('j', strtotime($selected_date));
 $days_passed = min($work_days_total, max(1, $current_day));
 $days_left = max(1, $work_days_total - $days_passed + 1);
 
-// --- Функции агрегации и расчётов (как в team.php) ---
 function calcMetrics($plan, $fact, $days_passed, $days_left, $work_days = 22) {
     if ($plan <= 0) return ['forecast' => 0, 'daily_target' => 0, 'status' => 'none', 'percent' => 0];
     $ideal = ceil($plan / $work_days);
@@ -43,7 +40,6 @@ function getAggregatedMetricsForUsers($user_ids, $pdo, $selected_month, $selecte
         $stmt->execute([$uid]);
         $tabel = $stmt->fetchColumn();
         if (!$tabel) continue;
-        // Планы
         $stmt = $pdo->prepare("SELECT * FROM plans WHERE tabel_number = ? AND period = ?");
         $stmt->execute([$tabel, $selected_month]);
         $planRow = $stmt->fetch();
@@ -52,28 +48,17 @@ function getAggregatedMetricsForUsers($user_ids, $pdo, $selected_month, $selecte
                 $totals['plan'][$f] += $planRow[$f.'_plan'] ?? 0;
             }
         }
-        // Месячный факт
-        $stmt = $pdo->prepare("SELECT COALESCE(SUM(calls),0) as calls, COALESCE(SUM(calls_answered),0) as calls_answered,
-            COALESCE(SUM(meetings),0) as meetings, COALESCE(SUM(contracts),0) as contracts,
-            COALESCE(SUM(registrations),0) as registrations, COALESCE(SUM(smart_cash),0) as smart_cash,
-            COALESCE(SUM(pos_systems),0) as pos_systems, COALESCE(SUM(inn_leads),0) as inn_leads,
-            COALESCE(SUM(teams),0) as teams, COALESCE(SUM(turnover),0) as turnover
-            FROM daily_reports WHERE user_id = ? AND strftime('%Y-%m', report_date) = ?");
+        $stmt = $pdo->prepare("SELECT COALESCE(SUM(calls),0) as calls, COALESCE(SUM(calls_answered),0) as calls_answered, COALESCE(SUM(meetings),0) as meetings, COALESCE(SUM(contracts),0) as contracts, COALESCE(SUM(registrations),0) as registrations, COALESCE(SUM(smart_cash),0) as smart_cash, COALESCE(SUM(pos_systems),0) as pos_systems, COALESCE(SUM(inn_leads),0) as inn_leads, COALESCE(SUM(teams),0) as teams, COALESCE(SUM(turnover),0) as turnover FROM daily_reports WHERE user_id = ? AND strftime('%Y-%m', report_date) = ?");
         $stmt->execute([$uid, $selected_month]);
         $factM = $stmt->fetch();
         if ($factM) {
-            foreach (['calls','calls_answered','meetings','contracts','registrations','smart_cash','pos_systems','inn_leads','teams','turnover'] as $f) {
-                $totals['fact_month'][$f] += $factM[$f];
-            }
+            foreach (['calls','calls_answered','meetings','contracts','registrations','smart_cash','pos_systems','inn_leads','teams','turnover'] as $f) { $totals['fact_month'][$f] += $factM[$f]; }
         }
-        // Дневной факт
         $stmt = $pdo->prepare("SELECT calls, calls_answered, meetings, contracts, registrations, smart_cash, pos_systems, inn_leads, teams, turnover FROM daily_reports WHERE user_id = ? AND report_date = ?");
         $stmt->execute([$uid, $selected_date]);
         $factD = $stmt->fetch();
         if ($factD) {
-            foreach (['calls','calls_answered','meetings','contracts','registrations','smart_cash','pos_systems','inn_leads','teams','turnover'] as $f) {
-                $totals['fact_today'][$f] += $factD[$f];
-            }
+            foreach (['calls','calls_answered','meetings','contracts','registrations','smart_cash','pos_systems','inn_leads','teams','turnover'] as $f) { $totals['fact_today'][$f] += $factD[$f]; }
         }
     }
     $result = [];
@@ -85,49 +70,51 @@ function getAggregatedMetricsForUsers($user_ids, $pdo, $selected_month, $selecte
         $fact = $totals['fact_month'][$key];
         $today = $totals['fact_today'][$key];
         $calc = calcMetrics($plan, $fact, $days_passed, $days_left);
-        $result[$key] = [
-            'plan' => $plan,
-            'fact' => $fact,
-            'today' => $today,
-            'percent' => $calc['percent'],
-            'forecast' => $calc['forecast'],
-            'daily_target' => $calc['daily_target'],
-            'status' => $calc['status'],
-            'label' => $labels[$key],
-            'icon' => $icons[$key],
-            'unit' => $units[$key] ?? ''
-        ];
+        $result[$key] = ['plan' => $plan, 'fact' => $fact, 'today' => $today, 'percent' => $calc['percent'], 'forecast' => $calc['forecast'], 'daily_target' => $calc['daily_target'], 'status' => $calc['status'], 'label' => $labels[$key], 'icon' => $icons[$key], 'unit' => $units[$key] ?? ''];
     }
     return $result;
 }
 
-// --- Сбор данных в зависимости от роли и уровня ---
 $show_ai_form = false;
-$ai_subordinates = []; // менеджеры, которые будут переданы в AI
+$ai_subordinates = [];
 $territories = [];
 $managers = [];
 $employees = [];
 
 if ($role == 'admin') {
-    // Админ видит всё, но для простоты покажем список всех менеджеров сразу
-    $stmt = $pdo->query("SELECT u.*, h.full_name as head_name, t.name as territory_name 
-        FROM users u 
-        LEFT JOIN users h ON u.head_tabel = h.tabel_number 
-        LEFT JOIN territories t ON u.territory_id = t.id 
-        WHERE u.role = 'manager' AND u.is_active = 1 ORDER BY u.full_name");
+    $stmt = $pdo->query("SELECT u.*, h.full_name as head_name, t.name as territory_name FROM users u LEFT JOIN users h ON u.head_tabel = h.tabel_number LEFT JOIN territories t ON u.territory_id = t.id WHERE u.role = 'manager' AND u.is_active = 1 ORDER BY u.full_name");
     $employees = $stmt->fetchAll();
     $show_ai_form = true;
     $ai_subordinates = $employees;
     $show_table = true;
 } elseif ($role == 'terman') {
-    // Термен: список территорий
+    $show_ai_form = true;
+    
     $stmt = $pdo->prepare("SELECT t.id, t.name FROM territories t JOIN territory_managers tm ON t.id = tm.territory_id WHERE tm.manager_id = ?");
     $stmt->execute([$_SESSION['user_id']]);
     $territories = $stmt->fetchAll();
 
     if ($level == 'root') {
         $show_territories = true;
-        // Рассчитываем агрегированные метрики для каждой территории
+        $show_table = true;
+        
+        // НАДЕЖНАЯ ЛОГИКА: Берем ID территорий и ищем по ним менеджеров
+        $territory_ids = array_column($territories, 'id');
+        if (!empty($territory_ids)) {
+            $in_clause = implode(',', array_fill(0, count($territory_ids), '?'));
+            $stmt = $pdo->prepare("SELECT u.*, h.full_name as head_name, t.name as territory_name 
+                FROM users u 
+                LEFT JOIN users h ON u.head_tabel = h.tabel_number 
+                LEFT JOIN territories t ON u.territory_id = t.id 
+                WHERE u.role = 'manager' AND u.is_active = 1 AND u.territory_id IN ($in_clause) ORDER BY u.full_name");
+            $stmt->execute($territory_ids);
+            $employees = $stmt->fetchAll();
+        } else {
+            $employees = [];
+        }
+        
+        $ai_subordinates = $employees;
+
         $territory_stats = [];
         foreach ($territories as $t) {
             $stmt = $pdo->prepare("SELECT u.id FROM users u WHERE u.role IN ('head','territory_head','manager') AND u.territory_id = ? AND u.is_active = 1");
@@ -139,26 +126,15 @@ if ($role == 'admin') {
             }
         }
     } elseif ($level == 'territory') {
-        // Показываем менеджеров выбранной территории (включая начальников? только менеджеров)
-        $stmt = $pdo->prepare("SELECT u.*, h.full_name as head_name, t.name as territory_name 
-            FROM users u 
-            LEFT JOIN users h ON u.head_tabel = h.tabel_number 
-            LEFT JOIN territories t ON u.territory_id = t.id 
-            WHERE u.role = 'manager' AND u.territory_id = ? AND u.is_active = 1 ORDER BY u.full_name");
+        $stmt = $pdo->prepare("SELECT u.*, h.full_name as head_name, t.name as territory_name FROM users u LEFT JOIN users h ON u.head_tabel = h.tabel_number LEFT JOIN territories t ON u.territory_id = t.id WHERE u.role = 'manager' AND u.territory_id = ? AND u.is_active = 1 ORDER BY u.full_name");
         $stmt->execute([$selected_id]);
         $employees = $stmt->fetchAll();
-        $show_ai_form = true;
-        $ai_subordinates = $employees;
         $show_table = true;
+        $ai_subordinates = $employees;
         $current_territory_name = $territories[array_search($selected_id, array_column($territories, 'id'))]['name'] ?? '';
     }
 } elseif (in_array($role, ['head', 'territory_head'])) {
-    // Начальник: его прямые подчинённые менеджеры
-    $stmt = $pdo->prepare("SELECT u.*, h.full_name as head_name, t.name as territory_name 
-        FROM users u 
-        LEFT JOIN users h ON u.head_tabel = h.tabel_number 
-        LEFT JOIN territories t ON u.territory_id = t.id 
-        WHERE u.manager_id = ? AND u.role = 'manager' AND u.is_active = 1 ORDER BY u.full_name");
+    $stmt = $pdo->prepare("SELECT u.*, h.full_name as head_name, t.name as territory_name FROM users u LEFT JOIN users h ON u.head_tabel = h.tabel_number LEFT JOIN territories t ON u.territory_id = t.id WHERE u.manager_id = ? AND u.role = 'manager' AND u.is_active = 1 ORDER BY u.full_name");
     $stmt->execute([$_SESSION['user_id']]);
     $employees = $stmt->fetchAll();
     $show_ai_form = true;
@@ -186,7 +162,6 @@ if ($role == 'admin') {
         .progress-fill.success { background: #2e7d32; }
         .progress-fill.warning { background: #ed6c02; }
         .progress-fill.danger { background: #d32f2f; }
-        /* Единая навигация как на дашборде */
         .navbar{background:linear-gradient(135deg,#1a1a2e,#16213e);color:#fff;padding:12px 16px;border-radius:16px;margin-bottom:20px;display:flex;justify-content:space-between;flex-wrap:wrap;align-items:center}.logo{font-size:1.3rem;font-weight:bold}.nav-links{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.nav-links a{color:#ccc;text-decoration:none;font-size:0.85rem}.nav-links .active{color:#fff;font-weight:bold}.user-info{color:#fff;font-weight:bold;margin-left:auto;font-size:0.9rem}.date-form{display:flex;gap:8px;align-items:center;margin-left:12px}.date-form input[type="date"]{padding:5px 8px;border-radius:8px;border:none;font-size:0.85rem}.date-form button{background:#fff;color:#1a1a2e;border:none;padding:5px 12px;border-radius:8px;font-weight:bold;cursor:pointer;font-size:0.85rem}
     </style>
 </head>
@@ -270,15 +245,16 @@ if ($role == 'admin') {
                 </thead>
                 <tbody>
                     <?php foreach ($employees as $sub): 
-                        // Получаем данные для каждого сотрудника (аналогично ai.php ранее)
-                        $stmt = $pdo->prepare("SELECT COALESCE(SUM(calls),0) calls, COALESCE(SUM(calls_answered),0) calls_answered,
-                            COALESCE(SUM(meetings),0) meetings, COALESCE(SUM(contracts),0) contracts,
-                            COALESCE(SUM(registrations),0) registrations, COALESCE(SUM(smart_cash),0) smart_cash,
-                            COALESCE(SUM(pos_systems),0) pos_systems, COALESCE(SUM(inn_leads),0) inn_leads,
-                            COALESCE(SUM(teams),0) teams, COALESCE(SUM(turnover),0) turnover
-                            FROM daily_reports WHERE user_id = ? AND strftime('%Y-%m', report_date) = strftime('%Y-%m', 'now')");
-                        $stmt->execute([$sub['id']]);
-                        $m = $stmt->fetch();
+                        $stmt = $pdo->prepare("SELECT COALESCE(SUM(calls),0) calls, COALESCE(SUM(calls_answered),0) calls_answered, COALESCE(SUM(meetings),0) meetings, COALESCE(SUM(contracts),0) contracts, COALESCE(SUM(teams),0) teams, COALESCE(SUM(turnover),0) turnover FROM daily_reports WHERE user_id = ? AND strftime('%Y-%m', report_date) = ?");
+                        $stmt->execute([$sub['id'], $selected_month]);
+                        $mDaily = $stmt->fetch();
+
+                        $monthStart = date('Y-m-01', strtotime($selected_date));
+                        $monthEnd = date('Y-m-t', strtotime($selected_date));
+                        $stmtInn = $pdo->prepare("SELECT SUM(CASE WHEN product = 'ТЭ' THEN 1 ELSE 0 END) as registrations, SUM(CASE WHEN product = 'Смарт' THEN 1 ELSE 0 END) as smart_cash, SUM(CASE WHEN product = 'ПОС' THEN 1 ELSE 0 END) as pos_systems, SUM(CASE WHEN product = 'Чаевые' THEN 1 ELSE 0 END) as inn_leads FROM inn_records WHERE employee_tabel = ? AND DATE(sale_date) BETWEEN ? AND ?");
+                        $stmtInn->execute([$sub['tabel_number'], $monthStart, $monthEnd]);
+                        $mInn = $stmtInn->fetch();
+                        $m = array_merge($mDaily, $mInn);
                     ?>
                     <tr>
                         <td><?= htmlspecialchars($sub['full_name']) ?></td>
@@ -303,7 +279,6 @@ if ($role == 'admin') {
 </div>
 
 <script>
-// AI запрос с фильтрацией по уровню
 function askAI(){
     let q = document.getElementById('ai_question').value.trim();
     if(!q) return;

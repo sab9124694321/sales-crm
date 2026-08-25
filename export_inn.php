@@ -9,6 +9,46 @@ $user_tabel = $_SESSION['tabel'];
 $can_edit = in_array($user_role, ['admin', 'terman', 'head']);
 
 // ------------------------------------------------------------------
+// МИГРАЦИЯ: добавляем новые поля, если их нет в таблице
+// ------------------------------------------------------------------
+function ensureColumns($pdo) {
+    $existing = $pdo->query("PRAGMA table_info(inn_records)")->fetchAll(PDO::FETCH_COLUMN, 1);
+    $newColumns = [
+        'is_installed'        => "ALTER TABLE inn_records ADD COLUMN is_installed INTEGER DEFAULT 0",
+        'checked_performance' => "ALTER TABLE inn_records ADD COLUMN checked_performance INTEGER DEFAULT 0",
+        'checked_turnover'    => "ALTER TABLE inn_records ADD COLUMN checked_turnover INTEGER DEFAULT 0",
+    ];
+    foreach ($newColumns as $col => $sql) {
+        if (!in_array($col, $existing)) {
+            $pdo->exec($sql);
+        }
+    }
+}
+ensureColumns($pdo);
+
+// ------------------------------------------------------------------
+// AJAX-обработчик для быстрого обновления чекбоксов
+// ------------------------------------------------------------------
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_update'])) {
+    if (!$can_edit) {
+        echo json_encode(['success' => false, 'error' => 'Нет прав']);
+        exit;
+    }
+    $id = (int)($_POST['id'] ?? 0);
+    $field = $_POST['field'] ?? '';
+    $value = (int)($_POST['value'] ?? 0);
+    $allowed_fields = ['is_installed', 'checked_performance', 'checked_turnover'];
+    if ($id > 0 && in_array($field, $allowed_fields)) {
+        $stmt = $pdo->prepare("UPDATE inn_records SET $field = ? WHERE id = ?");
+        $stmt->execute([$value, $id]);
+        echo json_encode(['success' => true]);
+    } else {
+        echo json_encode(['success' => false, 'error' => 'Неверные параметры']);
+    }
+    exit;
+}
+
+// ------------------------------------------------------------------
 // Функция получения списка сотрудников команды (под одним руководителем)
 // ------------------------------------------------------------------
 function getTeamEmployees($pdo, $user_id, $user_tabel, $user_role) {
@@ -47,7 +87,7 @@ foreach ($accessible_employees as $emp) {
 }
 
 // ------------------------------------------------------------------
-// Обработка удаления и редактирования
+// Обработка удаления и редактирования (POST из модального окна)
 // ------------------------------------------------------------------
 if (isset($_GET['delete']) && $can_edit) {
     $pdo->prepare("DELETE FROM inn_records WHERE id = ?")->execute([$_GET['delete']]);
@@ -55,9 +95,39 @@ if (isset($_GET['delete']) && $can_edit) {
     exit;
 }
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_id']) && $can_edit) {
-    $stmt = $pdo->prepare("UPDATE inn_records SET inn = ?, product = ?, sale_date = ? WHERE id = ?");
-    $stmt->execute([trim($_POST['inn']), $_POST['product'], $_POST['sale_date'], $_POST['edit_id']]);
+    $stmt = $pdo->prepare("UPDATE inn_records SET inn = ?, product = ?, sale_date = ?, is_installed = ?, checked_performance = ?, checked_turnover = ? WHERE id = ?");
+    $stmt->execute([
+        trim($_POST['inn']),
+        $_POST['product'],
+        $_POST['sale_date'],
+        isset($_POST['is_installed']) ? 1 : 0,
+        isset($_POST['checked_performance']) ? 1 : 0,
+        isset($_POST['checked_turnover']) ? 1 : 0,
+        $_POST['edit_id']
+    ]);
     header("Location: export_inn.php?" . http_build_query(array_diff_key($_GET, ['edit_id' => ''])));
+    exit;
+}
+
+// ------------------------------------------------------------------
+// Обработка массовой проверки по списку ИНН
+// ------------------------------------------------------------------
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['check_list'])) {
+    $check_type = $_POST['check_type'] ?? '';
+    $inn_list_text = trim($_POST['inn_list'] ?? '');
+    if (!empty($inn_list_text) && in_array($check_type, ['performance', 'turnover'])) {
+        $inn_list = preg_split('/[\s,;]+/u', $inn_list_text);
+        $inn_list = array_filter(array_map('trim', $inn_list), fn($v) => $v !== '');
+        if (!empty($inn_list)) {
+            $placeholders = implode(',', array_fill(0, count($inn_list), '?'));
+            $col = $check_type === 'performance' ? 'checked_performance' : 'checked_turnover';
+            $sql = "UPDATE inn_records SET $col = 1 WHERE inn IN ($placeholders) AND $col = 0";
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute($inn_list);
+        }
+    }
+    $back_url = 'export_inn.php?' . http_build_query(array_diff_key($_GET, ['check_list' => '']));
+    header("Location: " . $back_url);
     exit;
 }
 
@@ -74,9 +144,11 @@ if ($employee_tabel !== '' && !isset($employee_options[$employee_tabel])) {
     $employee_tabel = '';
 }
 
-// ДОБАВЛЕНО: фильтры по is_key и station_type
-$is_key_filter = $_GET['is_key'] ?? '';        // '', 'key', 'nonkey'
-$station_type_filter = $_GET['station_type'] ?? ''; // '', 'pirate', 'target', 'newreg'
+$is_key_filter = $_GET['is_key'] ?? '';
+$station_type_filter = $_GET['station_type'] ?? '';
+$is_installed_filter = $_GET['is_installed'] ?? '';
+$checked_performance_filter = $_GET['checked_performance'] ?? '';
+$checked_turnover_filter = $_GET['checked_turnover'] ?? '';
 
 $where = [];
 $params = [];
@@ -95,8 +167,6 @@ if ($filter_by_products) {
     $params = array_merge($params, $products_selected);
 }
 
-// ДОБАВЛЕНО: условия для is_key (только если столбец существует)
-// Проверяем существование столбцов в таблице
 $cols = $pdo->query("PRAGMA table_info(inn_records)")->fetchAll(PDO::FETCH_COLUMN, 1);
 $hasKey = in_array('is_key', $cols);
 $hasStation = in_array('station_type', $cols);
@@ -108,6 +178,19 @@ if ($hasKey && $is_key_filter !== '') {
 if ($hasStation && $station_type_filter !== '') {
     $where[] = "station_type = ?";
     $params[] = $station_type_filter;
+}
+// Всегда применяем фильтры по новым полям (они точно существуют после миграции)
+if ($is_installed_filter !== '') {
+    $where[] = "is_installed = ?";
+    $params[] = (int)$is_installed_filter;
+}
+if ($checked_performance_filter !== '') {
+    $where[] = "checked_performance = ?";
+    $params[] = (int)$checked_performance_filter;
+}
+if ($checked_turnover_filter !== '') {
+    $where[] = "checked_turnover = ?";
+    $params[] = (int)$checked_turnover_filter;
 }
 
 // Логика фильтра по сотруднику
@@ -122,12 +205,10 @@ if ($user_role !== 'admin') {
         $params = array_merge($params, $allowed_tabels);
     }
 } else {
-    // Админ
     if ($employee_tabel !== '') {
         $where[] = "employee_tabel = ?";
         $params[] = $employee_tabel;
     }
-    // иначе без ограничения по сотруднику
 }
 
 $sql = "SELECT * FROM inn_records";
@@ -141,10 +222,31 @@ $stmt->execute($params);
 $rows = $stmt->fetchAll();
 
 // ------------------------------------------------------------------
-// ЧИПСЫ: гарантируем, что список продуктов всегда не пуст
+// ПОДСЧЁТ ИНН и ДУБЛЕЙ
+// ------------------------------------------------------------------
+$total_inns = count($rows);
+$inn_counts = [];
+foreach ($rows as $r) {
+    $inn = $r['inn'];
+    if (isset($inn_counts[$inn])) {
+        $inn_counts[$inn]++;
+    } else {
+        $inn_counts[$inn] = 1;
+    }
+}
+$duplicate_inns = 0;
+foreach ($inn_counts as $count) {
+    if ($count > 1) {
+        $duplicate_inns += ($count - 1); // считаем количество лишних дублей
+    }
+}
+// (альтернативный вариант: просто количество уникальных ИНН, которые повторяются)
+// $duplicate_inns = count(array_filter($inn_counts, fn($c) => $c > 1));
+
+// ------------------------------------------------------------------
+// ЧИПСЫ: список продуктов
 // ------------------------------------------------------------------
 $products_from_db = $pdo->query("SELECT DISTINCT product FROM inn_records WHERE product IS NOT NULL AND product != '' ORDER BY product")->fetchAll(PDO::FETCH_COLUMN);
-// Если в БД нет продуктов – используем стандартный список
 if (empty($products_from_db)) {
     $products_list = ['ТЭ', 'Смарт', 'ПОС', 'Чаевые'];
 } else {
@@ -153,7 +255,6 @@ if (empty($products_from_db)) {
 
 $all_products_json = json_encode($products_list);
 
-// Если GET-параметр products не задан – выбираем все продукты
 if ($products_param === '') {
     $selectedProducts = $products_list;
 } else {
@@ -162,7 +263,7 @@ if ($products_param === '') {
 $initial_selected_json = json_encode($selectedProducts);
 
 // ------------------------------------------------------------------
-// Скачивание CSV
+// Скачивание CSV (с учётом новых полей)
 // ------------------------------------------------------------------
 if (isset($_GET['download'])) {
     error_reporting(0);
@@ -171,7 +272,7 @@ if (isset($_GET['download'])) {
     header('Content-Disposition: attachment; filename=inn_' . date('Y-m-d') . '.csv');
     $out = fopen('php://output', 'w');
     fwrite($out, "\xEF\xBB\xBF");
-    fputcsv($out, ['ИНН', 'Продукт', 'Сотрудник', 'Руководитель', 'Дата', 'Ключевая', 'Тип станции'], ';', '"', "\\");
+    fputcsv($out, ['ИНН', 'Продукт', 'Сотрудник', 'Руководитель', 'Дата', 'Ключевая', 'Тип станции', 'Установлен', 'Зашёл в произв.', 'Оборот 10т'], ';', '"', "\\");
     foreach ($rows as $r) {
         $is_key_label = isset($r['is_key']) ? ($r['is_key'] ? 'Ключевая' : 'Неключевая') : 'Н/Д';
         $station_label = isset($r['station_type']) ? $r['station_type'] : '';
@@ -182,7 +283,10 @@ if (isset($_GET['download'])) {
             $r['head_name'] ?? '',
             $r['sale_date'],
             $is_key_label,
-            $station_label
+            $station_label,
+            isset($r['is_installed']) && $r['is_installed'] ? 'Да' : 'Нет',
+            isset($r['checked_performance']) && $r['checked_performance'] ? 'Да' : 'Нет',
+            isset($r['checked_turnover']) && $r['checked_turnover'] ? 'Да' : 'Нет'
         ], ';', '"', "\\");
     }
     fclose($out);
@@ -226,6 +330,17 @@ if (isset($_GET['download'])) {
         .chip .remove:hover { color: #e03131; }
         .chips-placeholder { color: #999; font-size: 0.9rem; }
         .action-buttons { display:flex; gap:10px; margin-top:10px; }
+        .check-list-box { background:#f8f9fa; border-radius:12px; padding:15px; margin-top:15px; border:1px dashed #ccc; }
+        .check-list-box textarea { width:100%; height:80px; margin-bottom:10px; padding:8px; border:1px solid #ccc; border-radius:8px; font-family:monospace; }
+        .checkbox-cell input { transform: scale(1.3); cursor:pointer; }
+        .update-checkbox { cursor: pointer; }
+
+        /* НОВЫЕ СТИЛИ ДЛЯ СЧЁТЧИКОВ И ПОДСВЕТКИ ДУБЛЕЙ */
+        .stats-bar { display: flex; gap: 20px; margin-bottom: 15px; padding: 10px 15px; background: #f0f4ff; border-radius: 12px; align-items: center; }
+        .stats-item { font-size: 14px; font-weight: 600; color: #333; }
+        .stats-item span { color: #1a73e8; }
+        .duplicate-row { background-color: #fff0f0; }
+        .duplicate-badge { background: #e03131; color: #fff; font-size: 10px; padding: 2px 6px; border-radius: 10px; margin-left: 5px; }
     </style>
 </head>
 <body>
@@ -264,7 +379,6 @@ if (isset($_GET['download'])) {
                     <?php endforeach; ?>
                 </select>
             </div>
-            <!-- ДОБАВЛЕНО: фильтр по ключевости (показываем только если столбец существует) -->
             <?php if ($hasKey): ?>
             <div class="filter-group">
                 <label>Ключевая</label>
@@ -275,7 +389,6 @@ if (isset($_GET['download'])) {
                 </select>
             </div>
             <?php endif; ?>
-            <!-- ДОБАВЛЕНО: фильтр по типу станции (показываем только если столбец существует) -->
             <?php if ($hasStation): ?>
             <div class="filter-group">
                 <label>Тип станции</label>
@@ -287,6 +400,31 @@ if (isset($_GET['download'])) {
                 </select>
             </div>
             <?php endif; ?>
+            <!-- Фильтры по новым полям (всегда видимы) -->
+            <div class="filter-group">
+                <label>Установлен</label>
+                <select name="is_installed">
+                    <option value="">Все</option>
+                    <option value="1" <?= $is_installed_filter === '1' ? 'selected' : '' ?>>Да</option>
+                    <option value="0" <?= $is_installed_filter === '0' ? 'selected' : '' ?>>Нет</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Зашёл в произв.</label>
+                <select name="checked_performance">
+                    <option value="">Все</option>
+                    <option value="1" <?= $checked_performance_filter === '1' ? 'selected' : '' ?>>Да</option>
+                    <option value="0" <?= $checked_performance_filter === '0' ? 'selected' : '' ?>>Нет</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Оборот 10т</label>
+                <select name="checked_turnover">
+                    <option value="">Все</option>
+                    <option value="1" <?= $checked_turnover_filter === '1' ? 'selected' : '' ?>>Да</option>
+                    <option value="0" <?= $checked_turnover_filter === '0' ? 'selected' : '' ?>>Нет</option>
+                </select>
+            </div>
             <div class="filter-group" style="flex:2;">
                 <label>Продукты</label>
                 <div class="chips-wrapper" id="chipsContainer"></div>
@@ -300,6 +438,36 @@ if (isset($_GET['download'])) {
         </div>
     </form>
 
+    <!-- Форма массовой проверки ИНН -->
+    <?php if ($can_edit): ?>
+    <div class="card">
+        <h3>📌 Массовая проверка ИНН</h3>
+        <p>Вставьте список ИНН (каждый с новой строки или через запятую). Система отметит те записи, которые есть в базе.</p>
+        <form method="POST" action="export_inn.php">
+            <div class="filter-row">
+                <div class="filter-group" style="flex:3;">
+                    <label>Список ИНН</label>
+                    <textarea name="inn_list" placeholder="7701234567, 7801234567" style="width:100%; height:100px;"></textarea>
+                </div>
+                <div class="filter-group">
+                    <label>Что проверить?</label>
+                    <select name="check_type">
+                        <option value="performance">Зашёл в производительность</option>
+                        <option value="turnover">Оборот 10т</option>
+                    </select>
+                </div>
+            </div>
+            <button type="submit" class="btn" name="check_list" value="1">✅ Проверить</button>
+        </form>
+    </div>
+    <?php endif; ?>
+
+    <!-- СЧЁТЧИКИ -->
+    <div class="stats-bar">
+        <div class="stats-item">📊 Всего ИНН после фильтрации: <span><?= $total_inns ?></span></div>
+        <div class="stats-item">⚠️ Количество дублей: <span><?= $duplicate_inns ?></span></div>
+    </div>
+
     <div class="card" style="overflow-x:auto;">
         <table>
             <thead>
@@ -311,29 +479,45 @@ if (isset($_GET['download'])) {
                     <th>Дата</th>
                     <?php if ($hasKey): ?><th>Ключевая</th><?php endif; ?>
                     <?php if ($hasStation): ?><th>Тип станции</th><?php endif; ?>
+                    <th>Установлен</th>
+                    <th>Зашёл в произв.</th>
+                    <th>Оборот 10т</th>
                     <?php if ($can_edit): ?><th>Действия</th><?php endif; ?>
                 </tr>
             </thead>
             <tbody>
             <?php if (empty($rows)): ?>
-                <tr><td colspan="<?= 5 + ($hasKey?1:0) + ($hasStation?1:0) + ($can_edit?1:0) ?>" style="text-align:center;color:#999;padding:24px;">Записей не найдено</td></tr>
+                <tr><td colspan="<?= 5 + ($hasKey?1:0) + ($hasStation?1:0) + 3 + ($can_edit?1:0) ?>" style="text-align:center;color:#999;padding:24px;">Записей не найдено</td></tr>
             <?php else: ?>
-                <?php foreach ($rows as $r): ?>
-                <tr>
-                    <td><?= htmlspecialchars($r['inn']) ?></td>
+                <?php foreach ($rows as $r): 
+                    $is_duplicate = isset($inn_counts[$r['inn']]) && $inn_counts[$r['inn']] > 1;
+                ?>
+                <tr class="<?= $is_duplicate ? 'duplicate-row' : '' ?>">
+                    <td>
+                        <?= htmlspecialchars($r['inn']) ?>
+                        <?php if ($is_duplicate): ?>
+                            <span class="duplicate-badge" title="Этот ИНН встречается несколько раз">дубль</span>
+                        <?php endif; ?>
+                    </td>
                     <td><?= htmlspecialchars($r['product']) ?></td>
                     <td><?= htmlspecialchars($r['employee_name']) ?></td>
                     <td><?= htmlspecialchars($r['head_name'] ?? '—') ?></td>
                     <td><?= htmlspecialchars($r['sale_date']) ?></td>
-                    <?php if ($hasKey): ?>
-                    <td><?= isset($r['is_key']) ? ($r['is_key'] ? 'Ключевая' : 'Неключевая') : 'Н/Д' ?></td>
-                    <?php endif; ?>
-                    <?php if ($hasStation): ?>
-                    <td><?= isset($r['station_type']) ? htmlspecialchars($r['station_type']) : '' ?></td>
-                    <?php endif; ?>
+                    <?php if ($hasKey): ?><td><?= isset($r['is_key']) ? ($r['is_key'] ? 'Ключевая' : 'Неключевая') : 'Н/Д' ?></td><?php endif; ?>
+                    <?php if ($hasStation): ?><td><?= isset($r['station_type']) ? htmlspecialchars($r['station_type']) : '' ?></td><?php endif; ?>
+                    <!-- Интерактивные чекбоксы (AJAX) -->
+                    <td class="checkbox-cell">
+                        <input type="checkbox" class="update-checkbox" data-id="<?= $r['id'] ?>" data-field="is_installed" <?= !empty($r['is_installed']) ? 'checked' : '' ?>>
+                    </td>
+                    <td class="checkbox-cell">
+                        <input type="checkbox" class="update-checkbox" data-id="<?= $r['id'] ?>" data-field="checked_performance" <?= !empty($r['checked_performance']) ? 'checked' : '' ?>>
+                    </td>
+                    <td class="checkbox-cell">
+                        <input type="checkbox" class="update-checkbox" data-id="<?= $r['id'] ?>" data-field="checked_turnover" <?= !empty($r['checked_turnover']) ? 'checked' : '' ?>>
+                    </td>
                     <?php if ($can_edit): ?>
                     <td>
-                        <button class="btn-edit" onclick="openEditModal(<?= $r['id'] ?>, '<?= htmlspecialchars($r['inn'], ENT_QUOTES) ?>', '<?= htmlspecialchars($r['product'], ENT_QUOTES) ?>', '<?= htmlspecialchars($r['sale_date'], ENT_QUOTES) ?>')">✏️</button>
+                        <button class="btn-edit" onclick="openEditModal(<?= $r['id'] ?>, '<?= htmlspecialchars($r['inn'], ENT_QUOTES) ?>', '<?= htmlspecialchars($r['product'], ENT_QUOTES) ?>', '<?= htmlspecialchars($r['sale_date'], ENT_QUOTES) ?>', <?= !empty($r['is_installed']) ? 1 : 0 ?>, <?= !empty($r['checked_performance']) ? 1 : 0 ?>, <?= !empty($r['checked_turnover']) ? 1 : 0 ?>)">✏️</button>
                         <a href="?delete=<?= $r['id'] ?>&<?= http_build_query(array_diff_key($_GET, ['delete' => ''])) ?>" class="btn btn-sm btn-danger" onclick="return confirm('Удалить запись ИНН <?= htmlspecialchars($r['inn']) ?>?')">✕</a>
                     </td>
                     <?php endif; ?>
@@ -346,7 +530,7 @@ if (isset($_GET['download'])) {
 </div>
 
 <?php if ($can_edit): ?>
-<!-- Модальное окно редактирования (только для админов/руководителей) -->
+<!-- Модальное окно редактирования -->
 <div id="editModal" class="modal">
     <div class="modal-content">
         <h3>✏️ Редактировать запись</h3>
@@ -359,6 +543,15 @@ if (isset($_GET['download'])) {
                 <?php endforeach; ?>
             </select></div>
             <div class="form-group"><label>Дата</label><input type="date" name="sale_date" id="edit_date" required></div>
+            <div class="form-group">
+                <label><input type="checkbox" name="is_installed" id="edit_installed"> Установлен</label>
+            </div>
+            <div class="form-group">
+                <label><input type="checkbox" name="checked_performance" id="edit_performance"> Зашёл в производительность</label>
+            </div>
+            <div class="form-group">
+                <label><input type="checkbox" name="checked_turnover" id="edit_turnover"> Оборот 10т</label>
+            </div>
             <div style="display:flex; gap:10px; margin-top:15px;">
                 <button type="submit" class="btn">💾 Сохранить</button>
                 <button type="button" class="btn btn-sm" onclick="closeEditModal()">Отмена</button>
@@ -368,40 +561,56 @@ if (isset($_GET['download'])) {
 </div>
 
 <script>
-// Функции редактирования (только для тех, у кого есть права)
-function openEditModal(id, inn, product, date) {
+function openEditModal(id, inn, product, date, is_installed, checked_performance, checked_turnover) {
     document.getElementById('edit_id').value = id;
     document.getElementById('edit_inn').value = inn;
     document.getElementById('edit_product').value = product;
     document.getElementById('edit_date').value = date;
+    document.getElementById('edit_installed').checked = is_installed == 1;
+    document.getElementById('edit_performance').checked = checked_performance == 1;
+    document.getElementById('edit_turnover').checked = checked_turnover == 1;
     document.getElementById('editModal').style.display = 'block';
 }
 function closeEditModal() { document.getElementById('editModal').style.display = 'none'; }
 window.onclick = function(e) { if (e.target === document.getElementById('editModal')) closeEditModal(); }
+
+// AJAX для чекбоксов в таблице
+document.querySelectorAll('.update-checkbox').forEach(function(checkbox) {
+    checkbox.addEventListener('change', function() {
+        const id = this.dataset.id;
+        const field = this.dataset.field;
+        const value = this.checked ? 1 : 0;
+        fetch('export_inn.php', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: 'ajax_update=1&id=' + id + '&field=' + field + '&value=' + value
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (!data.success) {
+                alert('Ошибка обновления');
+                this.checked = !this.checked; // откат
+            }
+        })
+        .catch(() => {
+            alert('Ошибка сети');
+            this.checked = !this.checked;
+        });
+    });
+});
 </script>
 <?php endif; ?>
 
-<!-- ========== СКРИПТ ДЛЯ ЧИПСОВ (вынесен наружу, работает для всех) ========== -->
+<!-- ========== СКРИПТ ДЛЯ ЧИПСОВ ========== -->
 <script>
-// ----- ОТЛАДКА: вывод данных в консоль -----
-console.log('🔍 ALL_PRODUCTS из PHP:', <?= $all_products_json ?>);
-console.log('🔍 selectedProducts из PHP:', <?= $initial_selected_json ?>);
-
-// ----- ЧИПСЫ -----
 const ALL_PRODUCTS = <?= $all_products_json ?>;
 let selectedProducts = <?= $initial_selected_json ?>;
 
 const chipsContainer = document.getElementById('chipsContainer');
 const productsInput = document.getElementById('productsInput');
 
-console.log('📦 chipsContainer:', chipsContainer);
-console.log('📦 productsInput:', productsInput);
-
 function renderChips() {
-    if (!chipsContainer) {
-        console.error('❌ chipsContainer не найден!');
-        return;
-    }
+    if (!chipsContainer) return;
     chipsContainer.innerHTML = '';
     if (!selectedProducts || selectedProducts.length === 0) {
         chipsContainer.innerHTML = '<span class="chips-placeholder">Ничего не выбрано</span>';
@@ -434,11 +643,9 @@ chipsContainer.addEventListener('click', function(e) {
 });
 
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('✅ DOM загружен, вызываем renderChips()');
     renderChips();
     updateInput();
 });
 </script>
-
 </body>
 </html>

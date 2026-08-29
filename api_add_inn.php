@@ -9,9 +9,11 @@ require_once 'db.php';
 
 $data = json_decode(file_get_contents('php://input'), true);
 $inn = trim($data['inn'] ?? '');
-$product = $data['product'] ?? '';
+$product = $data['product'] ?? ''; // всё ещё нужно для различения ТЭ/Смарт/ПОС/Чаевые
 $is_key = isset($data['is_key']) ? (int)$data['is_key'] : 0;
 $station_type = $data['station_type'] ?? 'newreg';
+$expected_turnover = isset($data['expected_turnover']) ? (float)$data['expected_turnover'] : 0;
+$client_type = $data['client_type'] ?? 'new'; // 'new' или 'expansion'
 
 if ((strlen($inn) < 10 || strlen($inn) > 12) || !ctype_digit($inn)) {
     echo json_encode(['success' => false, 'error' => 'Invalid INN']);
@@ -21,8 +23,8 @@ if ((strlen($inn) < 10 || strlen($inn) > 12) || !ctype_digit($inn)) {
 try {
     $stmt = $pdo->prepare("
         INSERT INTO inn_records 
-        (inn, product, employee_tabel, employee_name, head_name, sale_date, is_key, station_type)
-        VALUES (?, ?, ?, ?, (SELECT full_name FROM users WHERE tabel_number = (SELECT head_tabel FROM users WHERE tabel_number = ?)), date('now'), ?, ?)
+        (inn, product, employee_tabel, employee_name, head_name, sale_date, is_key, station_type, expected_turnover, client_type)
+        VALUES (?, ?, ?, ?, (SELECT full_name FROM users WHERE tabel_number = (SELECT head_tabel FROM users WHERE tabel_number = ?)), date('now'), ?, ?, ?, ?)
     ");
     $stmt->execute([
         $inn,
@@ -31,7 +33,9 @@ try {
         $_SESSION['name'],
         $_SESSION['tabel'],
         $is_key,
-        $station_type
+        $station_type,
+        $expected_turnover,
+        $client_type
     ]);
     echo json_encode(['success' => true, 'saved' => $stmt->rowCount()]);
 } catch (Exception $e) {

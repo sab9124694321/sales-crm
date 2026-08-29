@@ -4,7 +4,7 @@ if (!isset($_SESSION['user_id'])) { header('Location: login.php'); exit; }
 require_once 'db.php';
 
 $role = $_SESSION['role'];
-if (!in_array($role, ['admin', 'head', 'territory_head'])) { die('Нет доступа'); }
+if (!in_array($role, ['admin', 'head', 'territory_head', 'terman'])) { die('Нет доступа'); }
 
 $meeting_date = $_GET['date'] ?? date('Y-m-d');
 $month = date('Y-m', strtotime($meeting_date));
@@ -13,7 +13,7 @@ $current_day = date('j', strtotime($meeting_date));
 $days_passed = min($work_days_total, max(1, $current_day));
 $days_left = max(1, $work_days_total - $days_passed + 1);
 
-// ----- подчинённые (как в team.php) -----
+// ----- подчинённые -----
 $subordinates = [];
 if ($role === 'admin') {
     $subordinates = $pdo->query("SELECT u.*, h.full_name as head_name, t.name as territory_name FROM users u LEFT JOIN users h ON u.head_tabel = h.tabel_number LEFT JOIN territories t ON u.territory_id = t.id WHERE u.role = 'manager' AND u.is_active = 1 ORDER BY u.full_name")->fetchAll();
@@ -28,11 +28,18 @@ if ($role === 'admin') {
 }
 
 // ---------- Сбор показателей ----------
-$team_today = ['calls'=>0,'calls_answered'=>0,'meetings'=>0,'contracts'=>0,'registrations'=>0,'smart_cash'=>0,'pos_systems'=>0,'inn_leads'=>0,'teams'=>0,'turnover'=>0];
+$team_today = ['calls'=>0,'calls_answered'=>0,'meetings'=>0,'contracts'=>0,'registrations'=>0,'smart_cash'=>0,'pos_systems'=>0,'inn_leads'=>0,'teams'=>0,'turnover'=>0,'expected_turnover'=>0];
 $team_month = $team_today;
 $team_plan  = $team_today;
 $employees = [];
 $all_quests = [];
+
+// Функция получения суммы expected_turnover из inn_records
+function getExpectedTurnover($pdo, $tabel, $date_from, $date_to) {
+    $stmt = $pdo->prepare("SELECT COALESCE(SUM(expected_turnover),0) as total FROM inn_records WHERE employee_tabel = ? AND DATE(sale_date) BETWEEN ? AND ?");
+    $stmt->execute([$tabel, $date_from, $date_to]);
+    return (float)$stmt->fetchColumn();
+}
 
 foreach ($subordinates as $sub) {
     $tab = $sub['tabel_number'];
@@ -40,26 +47,46 @@ foreach ($subordinates as $sub) {
     $pStmt = $pdo->prepare("SELECT * FROM plans WHERE tabel_number=? AND period=?");
     $pStmt->execute([$tab, $month]);
     $plan = $pStmt->fetch();
-    if (!$plan) $plan = ['calls_plan'=>350,'calls_answered_plan'=>245,'meetings_plan'=>35,'contracts_plan'=>21,'registrations_plan'=>15,'smart_cash_plan'=>10,'pos_systems_plan'=>5,'inn_leads_plan'=>5,'teams_plan'=>3,'turnover_plan'=>1500000];
+    if (!$plan) $plan = [
+        'calls_plan'=>350,'calls_answered_plan'=>245,'meetings_plan'=>35,'contracts_plan'=>21,
+        'registrations_plan'=>15,'smart_cash_plan'=>10,'pos_systems_plan'=>5,'inn_leads_plan'=>5,
+        'teams_plan'=>3,'turnover_plan'=>1500000,'expected_turnover_plan'=>16000000
+    ];
 
-    // факт за день
+    // факт за день (из daily_reports)
     $dStmt = $pdo->prepare("SELECT calls,calls_answered,meetings,contracts,registrations,smart_cash,pos_systems,inn_leads,teams,turnover FROM daily_reports WHERE user_id=? AND report_date=?");
     $dStmt->execute([$sub['id'], $meeting_date]);
     $day = $dStmt->fetch();
     if (!$day) $day = array_fill_keys(['calls','calls_answered','meetings','contracts','registrations','smart_cash','pos_systems','inn_leads','teams','turnover'], 0);
 
-    // месяц
+    // факт за день по обороту из inn_records
+    $day['expected_turnover'] = getExpectedTurnover($pdo, $tab, $meeting_date, $meeting_date);
+
+    // месяц (из daily_reports)
     $mStmt = $pdo->prepare("SELECT COALESCE(SUM(calls),0) as calls, COALESCE(SUM(calls_answered),0) as calls_answered, COALESCE(SUM(meetings),0) as meetings, COALESCE(SUM(contracts),0) as contracts, COALESCE(SUM(registrations),0) as registrations, COALESCE(SUM(smart_cash),0) as smart_cash, COALESCE(SUM(pos_systems),0) as pos_systems, COALESCE(SUM(inn_leads),0) as inn_leads, COALESCE(SUM(teams),0) as teams, COALESCE(SUM(turnover),0) as turnover FROM daily_reports WHERE user_id=? AND strftime('%Y-%m',report_date)=?");
     $mStmt->execute([$sub['id'], $month]);
     $mon = $mStmt->fetch();
+    if (!$mon) $mon = array_fill_keys(['calls','calls_answered','meetings','contracts','registrations','smart_cash','pos_systems','inn_leads','teams','turnover'], 0);
 
-    // квесты
-    $qStmt = $pdo->prepare("SELECT q.title, q.description, q.type, q.points, q.ends_at, qt.status, qt.taken_at FROM quest_takers qt JOIN quests q ON qt.quest_id=q.id WHERE qt.employee_tabel=? AND qt.status NOT IN ('closed','rewarded','failed') AND (qt.taken_at<=? OR q.ends_at>=?) ORDER BY q.ends_at");
-    $qStmt->execute([$tab, $meeting_date, $meeting_date]);
+    // месяц по обороту из inn_records
+    $month_start = date('Y-m-01', strtotime($meeting_date));
+    $month_end = date('Y-m-t', strtotime($meeting_date));
+    $mon['expected_turnover'] = getExpectedTurnover($pdo, $tab, $month_start, $month_end);
+
+    // ---------- КВЕСТЫ: показываем все, включая просроченные ----------
+    $qStmt = $pdo->prepare("
+        SELECT q.title, q.description, q.type, q.points, q.ends_at, qt.status, qt.taken_at 
+        FROM quest_takers qt 
+        JOIN quests q ON qt.quest_id = q.id 
+        WHERE qt.employee_tabel = ? 
+          AND qt.status NOT IN ('closed', 'rewarded')
+        ORDER BY q.ends_at ASC, qt.status
+    ");
+    $qStmt->execute([$tab]);
     $quests = $qStmt->fetchAll();
 
     // накопление по команде
-    foreach (['calls','calls_answered','meetings','contracts','registrations','smart_cash','pos_systems','inn_leads','teams','turnover'] as $f) {
+    foreach (['calls','calls_answered','meetings','contracts','registrations','smart_cash','pos_systems','inn_leads','teams','turnover','expected_turnover'] as $f) {
         $team_today[$f] += $day[$f];
         $team_month[$f] += $mon[$f];
         $team_plan[$f] += ($plan[$f.'_plan'] ?? 0);
@@ -67,7 +94,7 @@ foreach ($subordinates as $sub) {
 
     // расчёт целей на день с учётом гэпа для каждого показателя
     $daily_targets = [];
-    foreach (['calls','calls_answered','meetings','contracts','registrations','smart_cash','pos_systems','inn_leads','teams','turnover'] as $f) {
+    foreach (['calls','calls_answered','meetings','contracts','registrations','smart_cash','pos_systems','inn_leads','teams','turnover','expected_turnover'] as $f) {
         $p = $plan[$f.'_plan'] ?? 0;
         $ideal = ceil($p / $work_days_total);
         $should_be = $ideal * ($days_passed - 1);
@@ -108,13 +135,9 @@ function calcSummary($plan, $fact, $dp, $dl, $wd = 22) {
     <title>📋 Протокол совещания</title>
     <link rel="stylesheet" href="style.css">
     <style>
-        @media print {
-            .no-print { display: none !important; }
-            body { font-size: 10px; }
-        }
+        @media print { .no-print { display: none !important; } body { font-size: 10px; } }
         body { font-family: system-ui; background:#fff; margin:0; padding:12px; }
         .container { max-width: 210mm; margin:0 auto; }
-        /* стандартная навигация (как на других страницах) */
         .nav { display:flex; align-items:center; padding:12px 20px; background:linear-gradient(135deg,#1a1a2e,#16213e); color:#fff; border-radius:16px; margin-bottom:20px; gap:12px; flex-wrap:wrap; }
         .nav a { color:#ccc; text-decoration:none; padding:8px 14px; border-radius:8px; font-size:13px; font-weight:500; }
         .nav a:hover, .nav a.active { background:rgba(255,255,255,0.1); color:#fff; }
@@ -133,7 +156,7 @@ function calcSummary($plan, $fact, $dp, $dl, $wd = 22) {
         .green { color:#070; }
         .orange { color:#e67300; }
         .badge { font-size:9px; padding:1px 5px; border-radius:8px; background:#eee; }
-        .filters { display:flex; gap:12px; align-items:flex-end; margin-bottom:16px; }
+        .filters { display:flex; gap:12px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap; }
         .filters input[type="date"] { padding:6px 10px; border-radius:8px; border:1px solid #ccc; }
         .legend { font-size:10px; color:#555; margin-bottom:12px; display:flex; gap:16px; flex-wrap:wrap; }
         .legend span { white-space:nowrap; }
@@ -143,11 +166,14 @@ function calcSummary($plan, $fact, $dp, $dl, $wd = 22) {
         .table-legend { font-size:9px; color:#555; margin-bottom:8px; }
         .btn { padding:6px 14px; border:none; border-radius:6px; cursor:pointer; background:#1a73e8; color:#fff; }
         .btn-sm { padding:4px 10px; font-size:12px; background:#6c757d; }
+        .status-badge { display:inline-block; padding:1px 6px; border-radius:10px; font-size:9px; }
+        .status-pending { background:#ffc107; color:#000; }
+        .status-in_progress { background:#17a2b8; color:#fff; }
+        .status-failed { background:#dc3545; color:#fff; }
     </style>
 </head>
 <body>
 
-<!-- Стандартная навигация (скрывается при печати) -->
 <div class="nav no-print">
     <a href="dashboard.php" class="logo">🚀 SZB</a>
     <a href="dashboard.php">📊 Дашборд</a>
@@ -162,9 +188,8 @@ function calcSummary($plan, $fact, $dp, $dl, $wd = 22) {
 </div>
 
 <div class="container">
-    <!-- Форма выбора даты (скрывается при печати) -->
     <div class="filters no-print">
-        <form method="get" style="display:flex; gap:10px; align-items:center;">
+        <form method="get" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
             <label>Дата совещания:</label>
             <input type="date" name="date" value="<?= $meeting_date ?>">
             <button type="submit" class="btn btn-sm">📅 Смотреть</button>
@@ -172,23 +197,32 @@ function calcSummary($plan, $fact, $dp, $dl, $wd = 22) {
         </form>
     </div>
 
-    <!-- Легенда общая -->
     <div class="legend">
         <span>📊 <strong>План</strong> – цель на месяц</span>
         <span>✅ <strong>Факт</strong> – результат за день</span>
         <span>🎯 <strong>Цель на день (с учётом отставания)</strong> – сколько нужно сегодня, чтобы догнать план</span>
+        <span>🔴 <strong>Просрочено</strong> – дедлайн прошёл</span>
+        <span>🟡 <strong>На подходе</strong> – до дедлайна ≤2 дней</span>
     </div>
 
-    <!-- БЛОК 1: Результат команды -->
+    <!-- БЛОК 1: Сводка команды -->
     <div class="block">
         <h3>📊 Сводка команды за <?= date('d.m.Y', strtotime($meeting_date)) ?></h3>
         <table>
             <tr><th>Показатель</th><th>План на месяц</th><th>Факт за день</th><th>Факт месяц</th><th>% выполнения</th><th>Прогноз</th><th>🎯 Цель на день</th></tr>
             <?php
             $metrics = [
-                'calls' => 'Звонки', 'calls_answered' => 'Дозвоны', 'meetings' => 'Встречи',
-                'contracts' => 'Договоры', 'registrations' => 'ТЭ', 'smart_cash' => 'Смарт',
-                'pos_systems' => 'ПОС', 'inn_leads' => 'Чаевые', 'teams' => 'Команды', 'turnover' => 'Оборот чаевых'
+                'calls' => 'Звонки',
+                'calls_answered' => 'Дозвоны',
+                'meetings' => 'Встречи',
+                'contracts' => 'Договоры',
+                'registrations' => 'ТЭ',
+                'smart_cash' => 'Смарт',
+                'pos_systems' => 'ПОС',
+                'inn_leads' => 'Чаевые',
+                'teams' => 'Команды',
+                'turnover' => 'Оборот чаевых',
+                'expected_turnover' => 'Оборот по терминалам (пират/целевой)'
             ];
             foreach ($metrics as $key => $label):
                 $plan = $team_plan[$key];
@@ -209,7 +243,7 @@ function calcSummary($plan, $fact, $dp, $dl, $wd = 22) {
         </table>
     </div>
 
-    <!-- БЛОК 2: Сотрудники с целью на день -->
+    <!-- БЛОК 2: Сотрудники -->
     <div class="block">
         <h3>👥 План/факт и цель на день (<?= count($employees) ?> чел.)</h3>
         <div class="table-legend">
@@ -243,11 +277,11 @@ function calcSummary($plan, $fact, $dp, $dl, $wd = 22) {
         </table>
     </div>
 
-    <!-- БЛОК 3: Задачи/квесты -->
+    <!-- БЛОК 3: КВЕСТЫ (все, включая просроченные) -->
     <div class="block">
-        <h3>📋 Задачи и квесты (активные)</h3>
+        <h3>📋 Квесты (активные и просроченные)</h3>
         <?php if (empty($all_quests)): ?>
-            <p>Нет активных квестов.</p>
+            <p>Нет квестов для отображения.</p>
         <?php else: ?>
         <table>
             <tr>
@@ -260,15 +294,28 @@ function calcSummary($plan, $fact, $dp, $dl, $wd = 22) {
                 <th>Срок</th>
                 <th>Статус</th>
             </tr>
-            <?php foreach ($all_quests as $q): 
+            <?php 
+            $today_ts = strtotime($meeting_date);
+            foreach ($all_quests as $q): 
                 $ends_at = $q['ends_at'];
                 $deadline = $ends_at ? strtotime($ends_at) : null;
-                $today_ts = strtotime($meeting_date);
                 $days_left_q = $deadline ? ceil(($deadline - $today_ts) / 86400) : null;
                 $is_overdue = $deadline && $deadline < $today_ts;
                 $approaching = !$is_overdue && $days_left_q !== null && $days_left_q <= 2;
                 $row_class = $is_overdue ? 'overdue' : ($approaching ? 'approaching' : '');
+                $status_class = match($q['status']) {
+                    'pending' => 'status-pending',
+                    'in_progress' => 'status-in_progress',
+                    'failed' => 'status-failed',
+                    default => ''
+                };
                 $taken_date = $q['taken_at'] ? date('d.m.Y', strtotime($q['taken_at'])) : '—';
+                $status_label = match($q['status']) {
+                    'pending' => 'Ожидает',
+                    'in_progress' => 'В работе',
+                    'failed' => 'Провален',
+                    default => $q['status']
+                };
             ?>
             <tr class="<?= $row_class ?>">
                 <td><?= htmlspecialchars($q['employee']) ?></td>
@@ -278,7 +325,7 @@ function calcSummary($plan, $fact, $dp, $dl, $wd = 22) {
                 <td><?= $q['points'] ?></td>
                 <td><?= $taken_date ?></td>
                 <td><?= $ends_at ? date('d.m.Y', $deadline) : '—' ?></td>
-                <td><?= $q['status'] ?></td>
+                <td><span class="status-badge <?= $status_class ?>"><?= $status_label ?></span></td>
             </tr>
             <?php endforeach; ?>
         </table>

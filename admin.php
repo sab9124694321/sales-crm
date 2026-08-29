@@ -78,12 +78,29 @@ if($_SERVER['REQUEST_METHOD']==='POST'&&isset($_POST['set_plan'])){
         $_POST['expected_turnover_plan']??16000000
     ];
     if(isset($_POST['apply_all'])&&$_POST['apply_all']=='1'){
-        $all=$pdo->query("SELECT tabel_number FROM users WHERE role='manager' AND is_active=1")->fetchAll();
-        foreach($all as $a){
-            $values[0]=$a['tabel_number'];
-            $pdo->prepare("INSERT INTO plans(tabel_number,period,calls_plan,calls_answered_plan,meetings_plan,contracts_plan,registrations_plan,smart_cash_plan,pos_systems_plan,inn_leads_plan,teams_plan,turnover_plan,expected_turnover_plan) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tabel_number,period) DO UPDATE SET calls_plan=excluded.calls_plan,calls_answered_plan=excluded.calls_answered_plan,meetings_plan=excluded.meetings_plan,contracts_plan=excluded.contracts_plan,registrations_plan=excluded.registrations_plan,smart_cash_plan=excluded.smart_cash_plan,pos_systems_plan=excluded.pos_systems_plan,inn_leads_plan=excluded.inn_leads_plan,teams_plan=excluded.teams_plan,turnover_plan=excluded.turnover_plan,expected_turnover_plan=excluded.expected_turnover_plan")->execute($values);
+        // Получаем менеджеров с учётом территории
+        $sql = "SELECT tabel_number FROM users WHERE role='manager' AND is_active=1";
+        $params = [];
+        if (!empty($_POST['territory_id'])) {
+            $sql .= " AND territory_id = ?";
+            $params[] = $_POST['territory_id'];
         }
-        $msg='<div style="background:#d4edda;padding:10px;border-radius:8px;margin-bottom:15px">✅ План назначен '.count($all).' сотрудникам</div>';
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $all = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        $count = 0;
+        foreach($all as $tabel){
+            $values[0]=$tabel;
+            $pdo->prepare("INSERT INTO plans(tabel_number,period,calls_plan,calls_answered_plan,meetings_plan,contracts_plan,registrations_plan,smart_cash_plan,pos_systems_plan,inn_leads_plan,teams_plan,turnover_plan,expected_turnover_plan) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tabel_number,period) DO UPDATE SET calls_plan=excluded.calls_plan,calls_answered_plan=excluded.calls_answered_plan,meetings_plan=excluded.meetings_plan,contracts_plan=excluded.contracts_plan,registrations_plan=excluded.registrations_plan,smart_cash_plan=excluded.smart_cash_plan,pos_systems_plan=excluded.pos_systems_plan,inn_leads_plan=excluded.inn_leads_plan,teams_plan=excluded.teams_plan,turnover_plan=excluded.turnover_plan,expected_turnover_plan=excluded.expected_turnover_plan")->execute($values);
+            $count++;
+        }
+        $territory_name = '';
+        if (!empty($_POST['territory_id'])) {
+            $stmt = $pdo->prepare("SELECT name FROM territories WHERE id = ?");
+            $stmt->execute([$_POST['territory_id']]);
+            $territory_name = ' (территория: ' . $stmt->fetchColumn() . ')';
+        }
+        $msg='<div style="background:#d4edda;padding:10px;border-radius:8px;margin-bottom:15px">✅ План назначен '.$count.' сотрудникам'.$territory_name.'</div>';
     }else{
         $pdo->prepare("INSERT INTO plans(tabel_number,period,calls_plan,calls_answered_plan,meetings_plan,contracts_plan,registrations_plan,smart_cash_plan,pos_systems_plan,inn_leads_plan,teams_plan,turnover_plan,expected_turnover_plan) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tabel_number,period) DO UPDATE SET calls_plan=excluded.calls_plan,calls_answered_plan=excluded.calls_answered_plan,meetings_plan=excluded.meetings_plan,contracts_plan=excluded.contracts_plan,registrations_plan=excluded.registrations_plan,smart_cash_plan=excluded.smart_cash_plan,pos_systems_plan=excluded.pos_systems_plan,inn_leads_plan=excluded.inn_leads_plan,teams_plan=excluded.teams_plan,turnover_plan=excluded.turnover_plan,expected_turnover_plan=excluded.expected_turnover_plan")->execute($values);
         $msg='<div style="background:#d4edda;padding:10px;border-radius:8px;margin-bottom:15px">✅ План сохранён</div>';
@@ -271,9 +288,16 @@ function changeManager(userId, selectEl) {
 </table>
 
 <?php elseif($tab=='plans'): ?><h3>Планы</h3><form method="POST"><input type="hidden" name="set_plan" value="1">
-<div style="display:flex;gap:10px;margin-bottom:15px">
+<div style="display:flex;gap:10px;margin-bottom:15px;flex-wrap:wrap;align-items:center;">
 <select name="plan_tabel"><option value="">Сотрудник</option><?php foreach($managers as$m)echo"<option value='{$m['tabel_number']}'>".htmlspecialchars($m['full_name'])."</option>"; ?></select>
-<input type="month" name="period" value="<?= date('Y-m') ?>" required></div>
+<input type="month" name="period" value="<?= date('Y-m') ?>" required>
+<select name="territory_id">
+    <option value="">Все территории</option>
+    <?php foreach($territories as $t): ?>
+        <option value="<?= $t['id'] ?>"><?= htmlspecialchars($t['name']) ?></option>
+    <?php endforeach; ?>
+</select>
+</div>
 <div class="grid2">
 <div class="form-group"><label>📞 Звонки</label><input type="number" name="calls_plan" value="350"></div>
 <div class="form-group"><label>✅ Дозвоны</label><input type="number" name="calls_answered_plan" value="245"></div>
@@ -288,7 +312,10 @@ function changeManager(userId, selectEl) {
 <!-- НОВОЕ поле для оборота по терминалам -->
 <div class="form-group"><label>💳 Оборот по терминалам (пират/целевой)</label><input type="number" name="expected_turnover_plan" value="16000000" step="1000"></div>
 </div>
-<label><input type="checkbox" name="apply_all" value="1"> Применить ко всем менеджерам</label>
+<div style="margin:10px 0;">
+    <label><input type="checkbox" name="apply_all" value="1"> Применить ко всем менеджерам выбранной территории</label>
+    <span style="font-size:0.8rem;color:#666;margin-left:10px;">(если территория не выбрана – ко всем менеджерам)</span>
+</div>
 <button type="submit" class="btn" style="margin-top:10px">💾 Сохранить</button></form>
 
 <?php elseif($tab=='territories'): ?>

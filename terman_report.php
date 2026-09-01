@@ -21,7 +21,11 @@ if ($row) {
 }
 
 // ── Функция получения показателей за день ──
-function getProductCounts($pdo, $tabel, $date_from, $date_to, $only_checked = false) {
+function getProductCounts($pdo, $tabel, $date_from, $date_to, $only_checked = false, $productivity_only = false) {
+    $cols = $pdo->query("PRAGMA table_info(inn_records)")->fetchAll(PDO::FETCH_COLUMN, 1);
+    $hasClient = in_array('client_type', $cols);
+    $hasStation = in_array('station_type', $cols);
+
     $sql = "
         SELECT
             SUM(CASE WHEN product IN ('ТЭ', 'Смарт', 'ПОС') THEN 1 ELSE 0 END) AS total,
@@ -32,11 +36,21 @@ function getProductCounts($pdo, $tabel, $date_from, $date_to, $only_checked = fa
         WHERE employee_tabel = ?
           AND DATE(sale_date) BETWEEN ? AND ?
     ";
+    $params = [$tabel, $date_from, $date_to];
+
     if ($only_checked) {
         $sql .= " AND checked_performance = 1";
     }
+
+    if ($productivity_only) {
+        // Исключаем расширения без пиратки
+        if ($hasClient && $hasStation) {
+            $sql .= " AND NOT (client_type = 'expansion' AND station_type != 'pirate')";
+        }
+    }
+
     $stmt = $pdo->prepare($sql);
-    $stmt->execute([$tabel, $date_from, $date_to]);
+    $stmt->execute($params);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
     return [
         'total'  => (int) ($row['total'] ?? 0),
@@ -124,13 +138,17 @@ while ($r = $stmt->fetch()) {
 // ── Сбор продаж ──
 $sales = [];
 $sales_checked = [];
+$sales_productivity = [];
+$sales_productivity_checked = [];
 $absences = [];
 foreach ($managers as $m) {
     $t = trim((string)$m['tabel_number']);
     foreach ($display_days as $d) {
         $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
-        $sales[$t][$date_str] = getProductCounts($pdo, $t, $date_str, $date_str, false);
-        $sales_checked[$t][$date_str] = getProductCounts($pdo, $t, $date_str, $date_str, true);
+        $sales[$t][$date_str] = getProductCounts($pdo, $t, $date_str, $date_str, false, false);
+        $sales_checked[$t][$date_str] = getProductCounts($pdo, $t, $date_str, $date_str, true, false);
+        $sales_productivity[$t][$date_str] = getProductCounts($pdo, $t, $date_str, $date_str, false, true);
+        $sales_productivity_checked[$t][$date_str] = getProductCounts($pdo, $t, $date_str, $date_str, true, true);
     }
     $stmt = $pdo->prepare("
         SELECT absence_date 
@@ -147,26 +165,52 @@ foreach ($managers as $m) {
 $fact_month = [];
 $fact_checked_month = [];
 $fact_adjusted_month = [];
+$productivity_fact_month = [];
+$productivity_checked_month = [];
+$productivity_adjusted_month = [];
+$manager_count_per_territory = [];
+
 foreach ($managers as $m) {
     $t = trim((string)$m['tabel_number']);
+    $terr_id = (int) ($m['territory_id'] ?? 0);
+    if (!isset($manager_count_per_territory[$terr_id])) {
+        $manager_count_per_territory[$terr_id] = 0;
+    }
+    $manager_count_per_territory[$terr_id]++;
+
     $total_manual = 0;
     $total_checked = 0;
     $total_adjusted = 0;
+    $prod_manual = 0;
+    $prod_checked = 0;
+    $prod_adjusted = 0;
+
     foreach ($display_days as $d) {
         $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
         $manual = $sales[$t][$date_str]['total'] ?? 0;
         $checked = $sales_checked[$t][$date_str]['total'] ?? 0;
+        $prod_man = $sales_productivity[$t][$date_str]['total'] ?? 0;
+        $prod_chk = $sales_productivity_checked[$t][$date_str]['total'] ?? 0;
+
         $total_manual += $manual;
         $total_checked += $checked;
+        $prod_manual += $prod_man;
+        $prod_checked += $prod_chk;
+
         if ($check_date && $date_str <= $check_date) {
             $total_adjusted += $checked;
+            $prod_adjusted += $prod_chk;
         } else {
             $total_adjusted += $manual;
+            $prod_adjusted += $prod_man;
         }
     }
     $fact_month[$t] = $total_manual;
     $fact_checked_month[$t] = $total_checked;
     $fact_adjusted_month[$t] = $total_adjusted;
+    $productivity_fact_month[$t] = $prod_manual;
+    $productivity_checked_month[$t] = $prod_checked;
+    $productivity_adjusted_month[$t] = $prod_adjusted;
 }
 
 // ── Настройки цветов ──
@@ -216,6 +260,11 @@ foreach ($managers as $m) {
             'total_rr'   => 0,
             'total_vp'   => 0,
             'total_cs'   => 0,
+            'productivity_total_fact' => 0,
+            'productivity_total_adjusted' => 0,
+            'productivity_rr' => 0,
+            'productivity_per_manager' => 0,
+            'manager_count' => 0,
         ];
     }
     if (!isset($structure[$terr_id]['heads'][$head_name])) {
@@ -230,9 +279,14 @@ foreach ($managers as $m) {
             'total_rr'   => 0,
             'total_vp'   => 0,
             'total_cs'   => 0,
+            'productivity_total_fact' => 0,
+            'productivity_total_adjusted' => 0,
+            'productivity_rr' => 0,
+            'productivity_per_manager' => 0,
         ];
     }
     $structure[$terr_id]['heads'][$head_name]['managers'][] = array_merge($m, ['tabel_key' => $tabel_key]);
+    $structure[$terr_id]['manager_count'] = $manager_count_per_territory[$terr_id] ?? 0;
 }
 
 // ── ВЫЧИСЛЕНИЕ ИТОГОВ ──
@@ -247,6 +301,8 @@ $grand_fact = 0;
 $grand_checked_fact = 0;
 $grand_adjusted_fact = 0;
 $grand_target = 0;
+$grand_productivity_fact = 0;
+$grand_productivity_adjusted = 0;
 $grand_daily = array_fill_keys($display_days, ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0]);
 
 foreach ($structure as $terr_id => &$terr) {
@@ -255,6 +311,8 @@ foreach ($structure as $terr_id => &$terr) {
     $terr_checked_fact = 0;
     $terr_adjusted_fact = 0;
     $terr_target = 0;
+    $terr_productivity_fact = 0;
+    $terr_productivity_adjusted = 0;
     $terr_daily = array_fill_keys($display_days, ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0]);
 
     foreach ($terr['heads'] as $head_name => &$head_group) {
@@ -263,6 +321,8 @@ foreach ($structure as $terr_id => &$terr) {
         $head_checked_fact = 0;
         $head_adjusted_fact = 0;
         $head_target = 0;
+        $head_productivity_fact = 0;
+        $head_productivity_adjusted = 0;
 
         foreach ($head_group['managers'] as &$m) {
             $t = $m['tabel_key'];
@@ -272,6 +332,8 @@ foreach ($structure as $terr_id => &$terr) {
             $fact = $fact_month[$t] ?? 0;
             $checked_fact = $fact_checked_month[$t] ?? 0;
             $adjusted_fact = $fact_adjusted_month[$t] ?? 0;
+            $prod_fact = $productivity_fact_month[$t] ?? 0;
+            $prod_adjusted = $productivity_adjusted_month[$t] ?? 0;
             $target = 0;
             foreach ($display_days as $d) {
                 $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
@@ -285,6 +347,7 @@ foreach ($structure as $terr_id => &$terr) {
             $m['target'] = $target;
             $m['vp']   = $plan > 0 ? round(($adjusted_fact / $plan) * 100) : 0;
             $m['rr']   = ($working_days_passed > 0) ? round(($adjusted_fact / $working_days_passed) * $total_working_days) : 0;
+            $m['productivity_rr'] = ($working_days_passed > 0) ? round(($prod_adjusted / $working_days_passed) * $total_working_days) : 0;
             $start_date = (!empty($m['position_start_date'])) ? $m['position_start_date'] : ($m['created_at'] ?? '');
             $m['staz'] = calcStaz($start_date);
 
@@ -293,6 +356,8 @@ foreach ($structure as $terr_id => &$terr) {
             $head_checked_fact += $checked_fact;
             $head_adjusted_fact += $adjusted_fact;
             $head_target += $target;
+            $head_productivity_fact += $prod_fact;
+            $head_productivity_adjusted += $prod_adjusted;
 
             foreach ($display_days as $d) {
                 $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
@@ -316,12 +381,18 @@ foreach ($structure as $terr_id => &$terr) {
         $head_group['total_cs'] = $head_target;
         $head_group['total_rr'] = ($working_days_passed > 0 && $head_adjusted_fact > 0) ? round(($head_adjusted_fact / $working_days_passed) * $total_working_days) : 0;
         $head_group['total_vp'] = $head_plan > 0 ? round(($head_adjusted_fact / $head_plan) * 100) : 0;
+        $head_group['productivity_total_fact'] = $head_productivity_fact;
+        $head_group['productivity_total_adjusted'] = $head_productivity_adjusted;
+        $head_group['productivity_rr'] = ($working_days_passed > 0 && $head_productivity_adjusted > 0) ? round(($head_productivity_adjusted / $working_days_passed) * $total_working_days) : 0;
+        $head_group['productivity_per_manager'] = count($head_group['managers']) > 0 ? round($head_group['productivity_rr'] / count($head_group['managers']), 1) : 0;
 
         $terr_plan += $head_plan;
         $terr_fact += $head_fact;
         $terr_checked_fact += $head_checked_fact;
         $terr_adjusted_fact += $head_adjusted_fact;
         $terr_target += $head_target;
+        $terr_productivity_fact += $head_productivity_fact;
+        $terr_productivity_adjusted += $head_productivity_adjusted;
     }
 
     $terr['total_plan'] = $terr_plan;
@@ -333,17 +404,27 @@ foreach ($structure as $terr_id => &$terr) {
     $terr['total_rr'] = ($working_days_passed > 0 && $terr_adjusted_fact > 0) ? round(($terr_adjusted_fact / $working_days_passed) * $total_working_days) : 0;
     $terr['total_vp'] = $terr_plan > 0 ? round(($terr_adjusted_fact / $terr_plan) * 100) : 0;
     $terr['daily_totals'] = $terr_daily;
+    $terr['productivity_total_fact'] = $terr_productivity_fact;
+    $terr['productivity_total_adjusted'] = $terr_productivity_adjusted;
+    $terr['productivity_rr'] = ($working_days_passed > 0 && $terr_productivity_adjusted > 0) ? round(($terr_productivity_adjusted / $working_days_passed) * $total_working_days) : 0;
+    $manager_count = $terr['manager_count'] ?? 1;
+    $terr['productivity_per_manager'] = $manager_count > 0 ? round($terr['productivity_rr'] / $manager_count, 1) : 0;
 
     $grand_plan += $terr_plan;
     $grand_fact += $terr_fact;
     $grand_checked_fact += $terr_checked_fact;
     $grand_adjusted_fact += $terr_adjusted_fact;
     $grand_target += $terr_target;
+    $grand_productivity_fact += $terr_productivity_fact;
+    $grand_productivity_adjusted += $terr_productivity_adjusted;
 }
 unset($terr, $head_group, $m);
 $grand_rr = ($working_days_passed > 0 && $grand_adjusted_fact > 0) ? round(($grand_adjusted_fact / $working_days_passed) * $total_working_days) : 0;
 $grand_vp = $grand_plan > 0 ? round(($grand_adjusted_fact / $grand_plan) * 100) : 0;
 $grand_cs = $grand_target;
+$grand_productivity_rr = ($working_days_passed > 0 && $grand_productivity_adjusted > 0) ? round(($grand_productivity_adjusted / $working_days_passed) * $total_working_days) : 0;
+$total_managers = count($managers);
+$grand_productivity_per_manager = $total_managers > 0 ? round($grand_productivity_rr / $total_managers, 1) : 0;
 
 $days_reverse = array_reverse($display_days);
 $weekdays_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
@@ -426,6 +507,10 @@ foreach ($managers as $m) {
         .cell-day.weekend{background:#f0f0f0 !important;color:#999 !important;}
         .absence-mark{background:#e0e0e0 !important;color:#555 !important;}
         .check-date-info{background:#e3f2fd;padding:6px 12px;border-radius:4px;margin-bottom:12px;font-size:13px;color:#0d47a1;border-left:4px solid #1976d2;}
+        .comment-preview{display:flex;align-items:center;gap:4px;flex-wrap:wrap;}
+        .comment-text{word-break:break-word;}
+        .toggle-comments{cursor:pointer;color:#1976d2;font-size:9px;white-space:nowrap;}
+        .comment-full{display:none;background:#f9f9f9;padding:4px;border-radius:4px;margin-top:4px;font-size:8px;max-height:100px;overflow-y:auto;width:100%;}
     </style>
 </head>
 <body>
@@ -501,6 +586,7 @@ foreach ($managers as $m) {
                         <th>RR</th>
                         <th>ВП</th>
                         <th>РП</th>
+                        <th>Произв. на 1 МПП</th>
                         <?php foreach ($days_reverse as $d): 
                             $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
                             $weekday_num = date('N', strtotime($date_str)) - 1;
@@ -512,7 +598,7 @@ foreach ($managers as $m) {
                         <?php endforeach; ?>
                     </tr>
                     <tr>
-                        <th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th>
+                        <th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th>
                         <?php foreach ($days_reverse as $d): ?>
                             <th class="sub-col">ИНН</th>
                             <th class="sub-col">Кл</th>
@@ -548,6 +634,7 @@ foreach ($managers as $m) {
                         <td style="font-weight:700;color:<?= (int) $head_group['total_rr'] >= (int) $head_group['total_plan'] ? '#2e7d32' : ((int) $head_group['total_rr'] >= (int) $head_group['total_plan']*0.7 ? '#ed6c02' : '#d32f2f') ?>"><?= (int) $head_group['total_rr'] ?></td>
                         <td style="font-weight:700;color:<?= (int) $head_group['total_vp'] >= 100 ? '#2e7d32' : ((int) $head_group['total_vp'] >= 70 ? '#ed6c02' : '#d32f2f') ?>"><?= (int) $head_group['total_vp'] ?>%</td>
                         <td><?= (int) $head_group['total_cs'] ?></td>
+                        <td><?= number_format($head_group['productivity_per_manager'] ?? 0, 1) ?></td>
                         <?php foreach ($days_reverse as $d): ?>
                             <td><?= isset($head_daily[$d]['total']) ? (int) $head_daily[$d]['total'] : '' ?></td>
                             <td><?= isset($head_daily[$d]['keyv']) ? (int) $head_daily[$d]['keyv'] : '' ?></td>
@@ -566,6 +653,7 @@ foreach ($managers as $m) {
                     <td style="font-weight:700;color:<?= (int) $terr['total_rr'] >= (int) $terr['total_plan'] ? '#2e7d32' : ((int) $terr['total_rr'] >= (int) $terr['total_plan']*0.7 ? '#ed6c02' : '#d32f2f') ?>"><?= (int) $terr['total_rr'] ?></td>
                     <td style="font-weight:700;color:<?= (int) $terr['total_vp'] >= 100 ? '#2e7d32' : ((int) $terr['total_vp'] >= 70 ? '#ed6c02' : '#d32f2f') ?>"><?= (int) $terr['total_vp'] ?>%</td>
                     <td><?= (int) $terr['total_cs'] ?></td>
+                    <td><?= number_format($terr['productivity_per_manager'] ?? 0, 1) ?></td>
                     <?php foreach ($days_reverse as $d): ?>
                         <td><?= isset($daily[$d]['total']) ? (int) $daily[$d]['total'] : '' ?></td>
                         <td><?= isset($daily[$d]['keyv']) ? (int) $daily[$d]['keyv'] : '' ?></td>
@@ -583,6 +671,7 @@ foreach ($managers as $m) {
                     <td style="font-weight:800;color:<?= $grand_rr >= $grand_plan ? '#2e7d32' : ($grand_rr >= $grand_plan*0.7 ? '#ed6c02' : '#d32f2f') ?>"><?= $grand_rr ?></td>
                     <td style="font-weight:800;color:<?= $grand_vp >= 100 ? '#2e7d32' : ($grand_vp >= 70 ? '#ed6c02' : '#d32f2f') ?>"><?= $grand_vp ?>%</td>
                     <td><?= $grand_cs ?></td>
+                    <td><?= number_format($grand_productivity_per_manager, 1) ?></td>
                     <?php foreach ($days_reverse as $d): ?>
                         <td><?= isset($grand_daily[$d]['total']) ? (int) $grand_daily[$d]['total'] : '' ?></td>
                         <td><?= isset($grand_daily[$d]['keyv']) ? (int) $grand_daily[$d]['keyv'] : '' ?></td>
@@ -615,6 +704,7 @@ foreach ($managers as $m) {
                             <th>RR</th>
                             <th>ВП</th>
                             <th>РП</th>
+                            <th>Произв. на 1 МПП</th>
                             <?php foreach ($days_reverse as $d): 
                                 $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
                                 $weekday_num = date('N', strtotime($date_str)) - 1;
@@ -628,7 +718,7 @@ foreach ($managers as $m) {
                             <th>Факт</th>
                         </tr>
                         <tr>
-                            <th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th>
+                            <th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th>
                             <?php foreach ($days_reverse as $d): ?>
                                 <th class="sub-col">ИНН</th>
                                 <th class="sub-col">Кл</th>
@@ -640,7 +730,7 @@ foreach ($managers as $m) {
                     </thead>
                     <tbody>
                     <?php
-                    $total_cols = 11 + 4 * count($display_days); 
+                    $total_cols = 12 + 4 * count($display_days); 
                     foreach ($terr['heads'] as $head_name => $head_group):
                         $managers_list = $head_group['managers'] ?? [];
                         $head_tabel = $head_group['head_tabel'] ?? '';
@@ -650,6 +740,7 @@ foreach ($managers as $m) {
                         $head_rr   = $head_group['total_rr'] ?? 0;
                         $head_vp   = $head_group['total_vp'] ?? 0;
                         $head_cs   = $head_group['total_cs'] ?? 0;
+                        $head_productivity_per_manager = $head_group['productivity_per_manager'] ?? 0;
                         $head_comments = getAllComments($pdo, $head_tabel, 'head');
                     ?>
                         <tr class="head-row">
@@ -657,11 +748,26 @@ foreach ($managers as $m) {
                                 <span class="comment-icon no-print" title="Редактировать комментарий руководителя" onclick="openCommentModal('<?= htmlspecialchars($head_tabel) ?>','<?= htmlspecialchars($head_name) ?>','head','<?= $selected_date ?>')">💬</span>
                                 <?= htmlspecialchars($head_name) ?>
                             </td>
-                            <td class="comment-cell" style="background:#f3e5f5;">
-                                <?php if(empty($head_comments)): ?>—<?php else: ?>
-                                    <?php foreach ($head_comments as $c): ?>
-                                        <div><?= date('d.m.Y', strtotime($c['comment_date'])) ?>: <?= htmlspecialchars($c['comment']) ?></div>
-                                    <?php endforeach; ?>
+                            <td class="comment-cell" style="background:#f3e5f5; max-width:200px;">
+                                <?php if(empty($head_comments)): ?>
+                                    —
+                                <?php else: 
+                                    $last = $head_comments[0];
+                                    $display_comment = mb_strlen($last['comment']) > 50 ? mb_substr($last['comment'], 0, 50).'...' : $last['comment'];
+                                    $has_more = count($head_comments) > 1;
+                                    $target_id = 'head-'.$head_tabel;
+                                ?>
+                                    <div class="comment-preview" data-target="<?= $target_id ?>">
+                                        <span class="comment-text"><?= date('d.m.Y', strtotime($last['comment_date'])) ?>: <?= htmlspecialchars($display_comment) ?></span>
+                                        <?php if($has_more): ?>
+                                            <span class="toggle-comments"> [ещё <?= count($head_comments)-1 ?>]</span>
+                                        <?php endif; ?>
+                                    </div>
+                                    <div class="comment-full" id="<?= $target_id ?>">
+                                        <?php foreach ($head_comments as $c): ?>
+                                            <div><?= date('d.m.Y', strtotime($c['comment_date'])) ?>: <?= htmlspecialchars($c['comment']) ?></div>
+                                        <?php endforeach; ?>
+                                    </div>
                                 <?php endif; ?>
                             </td>
                             <td colspan="<?= $total_cols - 2 ?>" style="background:#f3e5f5;"></td>
@@ -676,6 +782,7 @@ foreach ($managers as $m) {
                             <td><?= $head_rr ?></td>
                             <td><?= $head_vp ?>%</td>
                             <td><?= $head_cs ?></td>
+                            <td><?= number_format($head_productivity_per_manager, 1) ?></td>
                             <?php 
                             $head_daily = array_fill_keys($display_days, ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0]);
                             foreach ($managers_list as $m) {
@@ -710,15 +817,31 @@ foreach ($managers as $m) {
                             $vp   = (int) ($m['vp'] ?? 0);
                             $cs   = (int) ($m['target'] ?? 0); 
                             $staz = $m['staz'] ?? '000/00';
+                            $productivity_rr = $m['productivity_rr'] ?? 0;
                             $manager_comments_list = $manager_comments[$t] ?? [];
                         ?>
                             <tr data-tabel="<?= htmlspecialchars((string)$t) ?>">
                                 <td></td>
-                                <td class="manager-comment-cell">
-                                    <?php if(empty($manager_comments_list)): ?>—<?php else: ?>
-                                        <?php foreach ($manager_comments_list as $c): ?>
-                                            <div><?= date('d.m.Y', strtotime($c['comment_date'])) ?>: <?= htmlspecialchars($c['comment']) ?></div>
-                                        <?php endforeach; ?>
+                                <td class="manager-comment-cell" style="max-width:200px;">
+                                    <?php if(empty($manager_comments_list)): ?>
+                                        —
+                                    <?php else: 
+                                        $last = $manager_comments_list[0];
+                                        $display_comment = mb_strlen($last['comment']) > 50 ? mb_substr($last['comment'], 0, 50).'...' : $last['comment'];
+                                        $has_more = count($manager_comments_list) > 1;
+                                        $target_id = 'mgr-'.$t;
+                                    ?>
+                                        <div class="comment-preview" data-target="<?= $target_id ?>">
+                                            <span class="comment-text"><?= date('d.m.Y', strtotime($last['comment_date'])) ?>: <?= htmlspecialchars($display_comment) ?></span>
+                                            <?php if($has_more): ?>
+                                                <span class="toggle-comments"> [ещё <?= count($manager_comments_list)-1 ?>]</span>
+                                            <?php endif; ?>
+                                        </div>
+                                        <div class="comment-full" id="<?= $target_id ?>">
+                                            <?php foreach ($manager_comments_list as $c): ?>
+                                                <div><?= date('d.m.Y', strtotime($c['comment_date'])) ?>: <?= htmlspecialchars($c['comment']) ?></div>
+                                            <?php endforeach; ?>
+                                        </div>
                                     <?php endif; ?>
                                 </td>
                                 <td class="name-col">
@@ -733,6 +856,7 @@ foreach ($managers as $m) {
                                 <td class="rr-col" style="color:<?= $rr >= $plan ? '#2e7d32' : ($rr >= $plan*0.7 ? '#ed6c02' : '#d32f2f') ?>"><?= $rr ?></td>
                                 <td style="color:<?= $vp >= 100 ? '#2e7d32' : ($vp >= 70 ? '#ed6c02' : '#d32f2f') ?>"><?= $vp ?>%</td>
                                 <td><?= $cs ?></td>
+                                <td><?= number_format($productivity_rr, 1) ?></td>
                                 <?php foreach ($days_reverse as $d):
                                     $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
                                     $is_weekend = date('N', strtotime($date_str)) >= 6;
@@ -779,6 +903,7 @@ foreach ($managers as $m) {
                         <td style="background:#fff8e1 !important;"><?= (int) $terr['total_rr'] ?></td>
                         <td style="background:#fff8e1 !important;"><?= (int) $terr['total_vp'] ?>%</td>
                         <td style="background:#fff8e1 !important;"><?= (int) $terr['total_cs'] ?></td>
+                        <td style="background:#fff8e1 !important;"><?= number_format($terr['productivity_per_manager'] ?? 0, 1) ?></td>
                         <?php foreach ($days_reverse as $d):
                             $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
                             $day_total = ['total'=>0, 'keyv'=>0, 'kas'=>0, 'target'=>0];
@@ -813,17 +938,19 @@ foreach ($managers as $m) {
     </div>
 </div>
 
-<!-- Модалки (без изменений) -->
+<!-- Модалки -->
 <div id="commentModal" class="modal">
     <div class="modal-box">
         <h3 id="commentModalTitle">💬 Комментарий</h3>
         <div id="commentModalInfo" style="font-size:13px;color:#666;margin-bottom:8px;"></div>
         <label>Дата: <input type="date" id="commentDate" style="width:100%;"></label>
         <label>Текст:</label>
-        <textarea id="commentText" rows="4"></textarea>
+        <textarea id="commentText" rows="4" <?= ($role === 'terman') ? '' : 'disabled' ?>></textarea>
         <div class="modal-actions">
             <button class="btn-cancel" onclick="closeModal('commentModal')">Отмена</button>
-            <button class="btn-save" onclick="saveComment()">💾 Сохранить</button>
+            <?php if ($role === 'terman'): ?>
+                <button class="btn-save" onclick="saveComment()">💾 Сохранить</button>
+            <?php endif; ?>
         </div>
     </div>
 </div>
@@ -972,6 +1099,29 @@ function closeModal(id) {
 }
 document.addEventListener('keydown', e => { if(e.key==='Escape') document.querySelectorAll('.modal').forEach(m=>m.classList.remove('active')); });
 document.querySelectorAll('.modal').forEach(m=>{ m.addEventListener('click', e=>{ if(e.target===m) m.classList.remove('active'); }); });
+
+// ── Переключение комментариев ──
+document.addEventListener('click', function(e) {
+    const toggle = e.target.closest('.toggle-comments');
+    if (toggle) {
+        e.preventDefault();
+        const parent = toggle.closest('.comment-preview');
+        if (parent) {
+            const targetId = parent.dataset.target;
+            const fullBlock = document.getElementById(targetId);
+            if (fullBlock) {
+                if (fullBlock.style.display === 'none' || fullBlock.style.display === '') {
+                    fullBlock.style.display = 'block';
+                    toggle.textContent = ' [скрыть]';
+                } else {
+                    fullBlock.style.display = 'none';
+                    const count = fullBlock.querySelectorAll('div').length;
+                    toggle.textContent = ' [ещё ' + count + ']';
+                }
+            }
+        }
+    }
+});
 </script>
 </body>
 </html>

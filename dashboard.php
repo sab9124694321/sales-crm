@@ -562,6 +562,8 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
     <a href="calls.php">📞 Я звоню</a>
     <a href="calls_acquiring.php">🎙️ AI контроль звонков</a>
     <a href="rop_control.php">🛡️ Контроль</a>
+    <!-- НОВАЯ ССЫЛКА НА ЧАЕВЫЕ -->
+    <a href="tips_rollout.php">📱 Чаевые</a>
     <a href="ai_dashboard.php">AI</a>
     <?php if ($user_role=='admin'): ?>
         <a href="admin.php">Админ</a>

@@ -7,10 +7,11 @@ $user_id = $_SESSION['user_id'];
 $user_role = $_SESSION['role'];
 $user_tabel = $_SESSION['tabel'];
 
-// Правильная логика доступа: начальники (имеют подчинённых) могут редактировать, менеджеры – только просмотр
+// Правильная логика доступа
 $is_manager = ($user_role === 'manager' || $user_role === 'ubr_middle' || $user_role === 'mmb_manager');
 $is_head = in_array($user_role, ['head', 'territory_head', 'mmb_tp_head', 'admin', 'terman']);
-$can_edit = $is_head;
+$can_edit = $is_head; // полные права на редактирование (все поля)
+$can_edit_installed = ($is_manager || $is_head); // менеджеры могут отмечать "Установлен"
 
 // ------------------------------------------------------------------
 // МИГРАЦИЯ: добавляем новые поля и таблицу истории
@@ -30,7 +31,6 @@ function ensureColumns($pdo) {
         }
     }
     
-    // Создаём таблицу истории проверок, если её нет
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS check_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,17 +47,30 @@ ensureColumns($pdo);
 // AJAX-обработчик для быстрого обновления чекбоксов
 // ------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_update'])) {
-    if (!$can_edit) {
-        echo json_encode(['success' => false, 'error' => 'Нет прав']);
-        exit;
-    }
     $id = (int)($_POST['id'] ?? 0);
     $field = $_POST['field'] ?? '';
     $value = (int)($_POST['value'] ?? 0);
+    
+    // Проверка прав
+    if ($field === 'is_installed') {
+        if (!$can_edit_installed) {
+            echo json_encode(['success' => false, 'error' => 'Нет прав']);
+            exit;
+        }
+    } else {
+        if (!$can_edit) {
+            echo json_encode(['success' => false, 'error' => 'Нет прав']);
+            exit;
+        }
+    }
+    
     $allowed_fields = ['is_installed', 'checked_performance', 'checked_turnover'];
     
-    // Обработка отдельного поля "Целевой список" (обновляем station_type)
     if ($field === 'is_target') {
+        if (!$can_edit) {
+            echo json_encode(['success' => false, 'error' => 'Нет прав']);
+            exit;
+        }
         $new_station = $value ? 'target' : 'newreg';
         $stmt = $pdo->prepare("UPDATE inn_records SET station_type = ? WHERE id = ?");
         $stmt->execute([$new_station, $id]);
@@ -142,6 +155,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_id']) && $can_ed
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['check_list']) && $can_edit) {
     $check_type = $_POST['check_type'] ?? '';
     $inn_list_text = trim($_POST['inn_list'] ?? '');
+    $reference_date = $_POST['reference_date'] ?? date('Y-m-d');
     if (!empty($inn_list_text) && in_array($check_type, ['performance', 'turnover', 'target'])) {
         $inn_list = preg_split('/[\s,;]+/u', $inn_list_text);
         $inn_list = array_filter(array_map('trim', $inn_list), fn($v) => $v !== '');
@@ -157,9 +171,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['check_list']) && $can
             $stmt->execute($inn_list);
             $count = $stmt->rowCount();
             
-            // Записываем в историю
-            $stmt = $pdo->prepare("INSERT INTO check_history (check_type, performed_by, count) VALUES (?, ?, ?)");
-            $stmt->execute([$check_type, $user_tabel, $count]);
+            // Записываем в историю с указанной датой
+            $performed_at = $reference_date . ' 00:00:00';
+            $stmt = $pdo->prepare("INSERT INTO check_history (check_type, performed_by, count, performed_at) VALUES (?, ?, ?, ?)");
+            $stmt->execute([$check_type, $user_tabel, $count, $performed_at]);
         }
     }
     $back_url = 'export_inn.php?' . http_build_query(array_diff_key($_GET, ['check_list' => '']));
@@ -551,7 +566,7 @@ if (isset($_GET['download'])) {
         <p>Вставьте список ИНН (каждый с новой строки или через запятую). Система отметит те записи, которые есть в базе.</p>
         <form method="POST" action="export_inn.php">
             <div class="filter-row">
-                <div class="filter-group" style="flex:3;">
+                <div class="filter-group" style="flex:2;">
                     <label>Список ИНН</label>
                     <textarea name="inn_list" placeholder="7701234567, 7801234567" style="width:100%; height:100px;"></textarea>
                 </div>
@@ -562,6 +577,11 @@ if (isset($_GET['download'])) {
                         <option value="turnover">Отметить "Оборот 10т"</option>
                         <option value="target">Отметить как "Целевой список"</option>
                     </select>
+                </div>
+                <div class="filter-group">
+                    <label>Дата актуальности списка</label>
+                    <input type="date" name="reference_date" value="<?= date('Y-m-d') ?>">
+                    <div style="font-size:0.7rem;color:#666;">Эта дата будет использоваться в отчёте термена</div>
                 </div>
             </div>
             <button type="submit" class="btn" name="check_list" value="1">✅ Применить</button>
@@ -619,7 +639,7 @@ if (isset($_GET['download'])) {
                     <?php if ($hasClient): ?><td><?= isset($r['client_type']) ? ($r['client_type'] === 'new' ? 'Новый' : 'Расширение') : '' ?></td><?php endif; ?>
                     <td><?= number_format($r['expected_turnover'] ?? 0, 0, '.', ' ') ?> ₽</td>
                     <td class="checkbox-cell">
-                        <input type="checkbox" class="update-checkbox" data-id="<?= $r['id'] ?>" data-field="is_installed" <?= !empty($r['is_installed']) ? 'checked' : '' ?> <?= $can_edit ? '' : 'disabled' ?>>
+                        <input type="checkbox" class="update-checkbox" data-id="<?= $r['id'] ?>" data-field="is_installed" <?= !empty($r['is_installed']) ? 'checked' : '' ?> <?= $can_edit_installed ? '' : 'disabled' ?>>
                     </td>
                     <td class="checkbox-cell">
                         <input type="checkbox" class="update-checkbox" data-id="<?= $r['id'] ?>" data-field="checked_performance" <?= !empty($r['checked_performance']) ? 'checked' : '' ?> <?= $can_edit ? '' : 'disabled' ?>>
@@ -646,7 +666,7 @@ if (isset($_GET['download'])) {
     </div>
 </div>
 
-<?php if ($can_edit): ?>
+<?php if ($can_edit_installed || $can_edit): ?>
 <!-- Модальное окно редактирования -->
 <div id="editModal" class="modal">
     <div class="modal-content">
@@ -668,8 +688,9 @@ if (isset($_GET['download'])) {
                 </select>
             </div>
             <div class="form-group">
-                <label><input type="checkbox" name="is_installed" id="edit_installed"> Установлен</label>
+                <label><input type="checkbox" name="is_installed" id="edit_installed" <?= $can_edit_installed ? '' : 'disabled' ?>> Установлен</label>
             </div>
+            <?php if ($can_edit): ?>
             <div class="form-group">
                 <label><input type="checkbox" name="checked_performance" id="edit_performance"> Зашёл в производительность</label>
             </div>
@@ -679,6 +700,7 @@ if (isset($_GET['download'])) {
             <div class="form-group">
                 <label><input type="checkbox" name="is_target" id="edit_target"> Целевой список</label>
             </div>
+            <?php endif; ?>
             <div style="display:flex; gap:10px; margin-top:15px;">
                 <button type="submit" class="btn">💾 Сохранить</button>
                 <button type="button" class="btn btn-sm" onclick="closeEditModal()">Отмена</button>
@@ -686,6 +708,7 @@ if (isset($_GET['download'])) {
         </form>
     </div>
 </div>
+<?php endif; ?>
 
 <script>
 function openEditModal(id, inn, product, date, is_installed, checked_performance, checked_turnover, expected_turnover, client_type, is_target) {
@@ -694,18 +717,19 @@ function openEditModal(id, inn, product, date, is_installed, checked_performance
     document.getElementById('edit_product').value = product;
     document.getElementById('edit_date').value = date;
     document.getElementById('edit_installed').checked = is_installed == 1;
+    <?php if ($can_edit): ?>
     document.getElementById('edit_performance').checked = checked_performance == 1;
     document.getElementById('edit_turnover').checked = checked_turnover == 1;
+    document.getElementById('edit_target').checked = is_target == 1;
+    <?php endif; ?>
     document.getElementById('edit_turnover_val').value = expected_turnover || 0;
     document.getElementById('edit_client_type').value = client_type || 'new';
-    document.getElementById('edit_target').checked = is_target == 1;
     document.getElementById('editModal').style.display = 'block';
 }
 function closeEditModal() { document.getElementById('editModal').style.display = 'none'; }
 window.onclick = function(e) { if (e.target === document.getElementById('editModal')) closeEditModal(); }
 
-// AJAX для чекбоксов
-<?php if ($can_edit): ?>
+// AJAX для чекбоксов (с учётом прав)
 document.querySelectorAll('.update-checkbox:not([disabled])').forEach(function(checkbox) {
     checkbox.addEventListener('change', function() {
         const id = this.dataset.id;
@@ -729,9 +753,7 @@ document.querySelectorAll('.update-checkbox:not([disabled])').forEach(function(c
         });
     });
 });
-<?php endif; ?>
 </script>
-<?php endif; ?>
 
 <!-- ========== СКРИПТ ДЛЯ ЧИПСОВ ========== -->
 <script>

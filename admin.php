@@ -17,7 +17,7 @@ if(isset($_GET['change_role']) && isset($_GET['new_role'])){
     exit;
 }
 
-// НОВОЕ: обработка смены начальника (обновляем и manager_id, и head_tabel)
+// Обработка смены начальника (обновляем и manager_id, и head_tabel)
 if(isset($_GET['change_manager']) && isset($_GET['new_manager_id'])){
     $id = intval($_GET['change_manager']);
     $new_manager_id = $_GET['new_manager_id'] ? intval($_GET['new_manager_id']) : null;
@@ -28,6 +28,15 @@ if(isset($_GET['change_manager']) && isset($_GET['new_manager_id'])){
         $head_tabel = $stmt->fetchColumn();
     }
     $pdo->prepare("UPDATE users SET manager_id=?, head_tabel=? WHERE id=?")->execute([$new_manager_id, $head_tabel, $id]);
+    echo 'ok';
+    exit;
+}
+
+// НОВОЕ: обработка изменения статуса (активен/уволен)
+if(isset($_GET['change_status']) && isset($_GET['new_status'])){
+    $id = intval($_GET['change_status']);
+    $new_status = $_GET['new_status'] == '1' ? 1 : 0;
+    $pdo->prepare("UPDATE users SET is_active=? WHERE id=?")->execute([$new_status, $id]);
     echo 'ok';
     exit;
 }
@@ -225,7 +234,7 @@ function changeRole(userId, selectEl) {
 }
 function moveUser(id,val){if(val)location.href='?move_user='+id+'&new_territory='+val;}
 
-// НОВОЕ: функция смены начальника
+// Смена начальника
 function changeManager(userId, selectEl) {
     let newManagerId = selectEl.value;
     if(confirm('Изменить начальника?')) {
@@ -236,7 +245,21 @@ function changeManager(userId, selectEl) {
             else alert('Ошибка при смене начальника');
         });
     } else {
-        // восстанавливаем предыдущее значение
+        selectEl.value = selectEl.getAttribute('data-old');
+    }
+}
+
+// НОВОЕ: смена статуса (активен/уволен)
+function changeStatus(userId, selectEl) {
+    let newStatus = selectEl.value;
+    if(confirm('Изменить статус на "' + (newStatus == '1' ? 'Активен' : 'Уволен') + '"?')) {
+        fetch('admin.php?change_status='+userId+'&new_status='+encodeURIComponent(newStatus))
+        .then(r => r.text())
+        .then(res => {
+            if(res.trim() === 'ok') location.reload();
+            else alert('Ошибка при изменении статуса');
+        });
+    } else {
         selectEl.value = selectEl.getAttribute('data-old');
     }
 }
@@ -277,7 +300,6 @@ function changeManager(userId, selectEl) {
     </select>
 <?php endif; ?>
 </td>
-<!-- НОВОЕ: колонка с выбором начальника -->
 <td>
     <select onchange="changeManager(<?= $u['id'] ?>, this)" data-old="<?= $u['manager_id'] ?? '' ?>">
         <option value="">—</option>
@@ -287,7 +309,12 @@ function changeManager(userId, selectEl) {
     </select>
 </td>
 <td><select onchange="moveUser(<?= $u['id'] ?>,this.value)"><option value=""><?= $u['tname']??'—' ?></option><?php foreach($territories as$t)echo"<option value='{$t['id']}'>".htmlspecialchars($t['name'])."</option>"; ?></select></td>
-<td><?= $u['is_active']?'✅':'❌' ?></td>
+<td>
+    <select onchange="changeStatus(<?= $u['id'] ?>, this)" data-old="<?= $u['is_active'] ?>">
+        <option value="1" <?= $u['is_active'] ? 'selected' : '' ?>>Активен</option>
+        <option value="0" <?= !$u['is_active'] ? 'selected' : '' ?>>Уволен</option>
+    </select>
+</td>
 <td><?php if($u['role']!='admin'): ?><a href="?delete=<?= $u['id'] ?>" onclick="return confirm('Удалить?')" style="color:red">✕</a><?php endif; ?></td>
 </tr>
 <?php endforeach; ?>

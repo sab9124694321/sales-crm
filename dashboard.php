@@ -734,11 +734,6 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
             <div class="inn-group">
                 <input type="text" id="inn_reg" placeholder="ИНН" style="flex:1; min-width:80px;">
                 <input type="number" id="turnover_reg" placeholder="Оборот, ₽" step="0.01" style="width:100px;">
-                <!-- Вместо селекта продукта — тип клиента -->
-                <select id="client_type_reg" style="font-size:0.8rem; padding:4px;">
-                    <option value="new">Новый клиент</option>
-                    <option value="expansion">Расширение</option>
-                </select>
                 <label><input type="checkbox" id="key_reg" value="1"> Ключ.</label>
                 <select id="station_reg" style="font-size:0.8rem; padding:4px;">
                     <option value="newreg">Новорег</option>
@@ -756,10 +751,6 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
             <div class="inn-group">
                 <input type="text" id="inn_pos" placeholder="ИНН" style="flex:1; min-width:80px;">
                 <input type="number" id="turnover_pos" placeholder="Оборот, ₽" step="0.01" style="width:100px;">
-                <select id="client_type_pos" style="font-size:0.8rem; padding:4px;">
-                    <option value="new">Новый клиент</option>
-                    <option value="expansion">Расширение</option>
-                </select>
                 <label><input type="checkbox" id="key_pos" value="1"> Ключ.</label>
                 <select id="station_pos" style="font-size:0.8rem; padding:4px;">
                     <option value="newreg">Новорег</option>
@@ -777,10 +768,6 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
             <div class="inn-group">
                 <input type="text" id="inn_smart" placeholder="ИНН" style="flex:1; min-width:80px;">
                 <input type="number" id="turnover_smart" placeholder="Оборот, ₽" step="0.01" style="width:100px;">
-                <select id="client_type_smart" style="font-size:0.8rem; padding:4px;">
-                    <option value="new">Новый клиент</option>
-                    <option value="expansion">Расширение</option>
-                </select>
                 <label><input type="checkbox" id="key_smart" value="1"> Ключ.</label>
                 <select id="station_smart" style="font-size:0.8rem; padding:4px;">
                     <option value="newreg">Новорег</option>
@@ -798,10 +785,6 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
             <div class="inn-group">
                 <input type="text" id="inn_tea" placeholder="ИНН" style="flex:1; min-width:80px;">
                 <input type="number" id="turnover_tea" placeholder="Оборот, ₽" step="0.01" style="width:100px;">
-                <select id="client_type_tea" style="font-size:0.8rem; padding:4px;">
-                    <option value="new">Новый клиент</option>
-                    <option value="expansion">Расширение</option>
-                </select>
                 <label><input type="checkbox" id="key_tea" value="1"> Ключ.</label>
                 <select id="station_tea" style="font-size:0.8rem; padding:4px;">
                     <option value="newreg">Новорег</option>
@@ -976,7 +959,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
 
 <script>
 function addInn(type) {
-    let inn='', prod='', field='', display='', turnover=0, client_type='';
+    let inn='', prod='', field='', display='', turnover=0;
     let is_key = 0, station_type = 'newreg';
     if(type==='reg'){
         inn=document.getElementById('inn_reg').value;
@@ -986,7 +969,6 @@ function addInn(type) {
         is_key = document.getElementById('key_reg').checked ? 1 : 0;
         station_type = document.getElementById('station_reg').value;
         turnover = parseFloat(document.getElementById('turnover_reg').value) || 0;
-        client_type = document.getElementById('client_type_reg').value;
     } else if(type==='pos'){
         inn=document.getElementById('inn_pos').value;
         prod='ПОС';
@@ -995,7 +977,6 @@ function addInn(type) {
         is_key = document.getElementById('key_pos').checked ? 1 : 0;
         station_type = document.getElementById('station_pos').value;
         turnover = parseFloat(document.getElementById('turnover_pos').value) || 0;
-        client_type = document.getElementById('client_type_pos').value;
     } else if(type==='smart'){
         inn=document.getElementById('inn_smart').value;
         prod='Смарт';
@@ -1004,7 +985,6 @@ function addInn(type) {
         is_key = document.getElementById('key_smart').checked ? 1 : 0;
         station_type = document.getElementById('station_smart').value;
         turnover = parseFloat(document.getElementById('turnover_smart').value) || 0;
-        client_type = document.getElementById('client_type_smart').value;
     } else if(type==='tea'){
         inn=document.getElementById('inn_tea').value;
         prod='Чаевые';
@@ -1013,9 +993,12 @@ function addInn(type) {
         is_key = document.getElementById('key_tea').checked ? 1 : 0;
         station_type = document.getElementById('station_tea').value;
         turnover = parseFloat(document.getElementById('turnover_tea').value) || 0;
-        client_type = document.getElementById('client_type_tea').value;
     }
     if(!inn){ alert('Введите ИНН'); return; }
+
+    // Автоматическое определение типа клиента
+    let client_type = (station_type === 'pirate') ? 'expansion' : 'new';
+
     fetch('/api_add_inn.php',{
         method:'POST',
         headers:{'Content-Type':'application/json'},

@@ -20,7 +20,7 @@ if ($row) {
     $check_date = substr($check_date, 0, 10);
 }
 
-// ── Функция получения показателей за день ──
+// ── Функция получения показателей за день (ИСПРАВЛЕНА) ──
 function getProductCounts($pdo, $tabel, $date_from, $date_to, $only_checked = false, $productivity_only = false) {
     $cols = $pdo->query("PRAGMA table_info(inn_records)")->fetchAll(PDO::FETCH_COLUMN, 1);
     $hasClient = in_array('client_type', $cols);
@@ -29,7 +29,7 @@ function getProductCounts($pdo, $tabel, $date_from, $date_to, $only_checked = fa
     $sql = "
         SELECT
             SUM(CASE WHEN product IN ('ТЭ', 'Смарт', 'ПОС') THEN 1 ELSE 0 END) AS total,
-            SUM(CASE WHEN is_key = 1 THEN 1 ELSE 0 END) AS keyv,
+            SUM(CASE WHEN is_key = 1 AND product IN ('ТЭ', 'Смарт', 'ПОС') THEN 1 ELSE 0 END) AS keyv,
             SUM(CASE WHEN product IN ('ПОС', 'Смарт') THEN 1 ELSE 0 END) AS kas,
             SUM(CASE WHEN station_type = 'target' THEN 1 ELSE 0 END) AS target
         FROM inn_records

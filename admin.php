@@ -17,11 +17,17 @@ if(isset($_GET['change_role']) && isset($_GET['new_role'])){
     exit;
 }
 
-// НОВОЕ: обработка смены начальника
+// НОВОЕ: обработка смены начальника (обновляем и manager_id, и head_tabel)
 if(isset($_GET['change_manager']) && isset($_GET['new_manager_id'])){
     $id = intval($_GET['change_manager']);
     $new_manager_id = $_GET['new_manager_id'] ? intval($_GET['new_manager_id']) : null;
-    $pdo->prepare("UPDATE users SET manager_id=? WHERE id=?")->execute([$new_manager_id, $id]);
+    $head_tabel = null;
+    if ($new_manager_id) {
+        $stmt = $pdo->prepare("SELECT tabel_number FROM users WHERE id = ?");
+        $stmt->execute([$new_manager_id]);
+        $head_tabel = $stmt->fetchColumn();
+    }
+    $pdo->prepare("UPDATE users SET manager_id=?, head_tabel=? WHERE id=?")->execute([$new_manager_id, $head_tabel, $id]);
     echo 'ok';
     exit;
 }

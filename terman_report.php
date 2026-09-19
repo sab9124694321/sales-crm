@@ -40,7 +40,7 @@ function getProductCounts($pdo, $tabel, $date_from, $date_to, $only_checked = fa
     $hasStation = in_array('station_type', $cols);
     $hasTurnover = in_array('expected_turnover', $cols);
     $turnoverSql = $hasTurnover
-        ? "SUM(CASE WHEN station_type IN ('pirate', 'target') THEN COALESCE(expected_turnover, 0) ELSE 0 END)"
+        ? "SUM(CASE WHEN station_type = 'pirate' THEN COALESCE(expected_turnover, 0) WHEN station_type IS NOT NULL THEN COALESCE(expected_turnover, 0) / 2.0 ELSE 0 END)"
         : "0";
     $sql = "
         SELECT
@@ -573,7 +573,7 @@ $is_tips = ($product_mode === 'tips');
                     <?php endforeach; ?>
                 </tr>
                 <tr>
-                    <th class="sub-col">мес</th><th class="sub-col">цель/день</th>
+                    <th class="sub-col">мес</th><th class="sub-col">пр/день</th>
                     <th class="sub-col">ГОСБ</th><th class="sub-col">ЦА</th><th class="sub-col">ЦС</th><th class="sub-col">пр/МПП</th>
                     <th class="sub-col">RR, шт</th><th class="sub-col">ВП, %</th>
                     <th class="sub-col">план</th><th class="sub-col">факт</th><th class="sub-col">RR, об</th><th class="sub-col">ср/день</th>
@@ -706,7 +706,7 @@ $is_tips = ($product_mode === 'tips');
                         <?php endforeach; ?>
                     </tr>
                     <tr>
-                        <th class="sub-col">мес</th><th class="sub-col">цель/день</th>
+                        <th class="sub-col">мес</th><th class="sub-col">пр/день</th>
                         <th class="sub-col">ГОСБ</th><th class="sub-col">ЦА</th><th class="sub-col">ЦС</th><th class="sub-col">пр/МПП</th>
                         <th class="sub-col">RR, шт</th><th class="sub-col">ВП, %</th>
                         <th class="sub-col">план</th><th class="sub-col">факт</th><th class="sub-col">RR, об</th>
@@ -875,7 +875,7 @@ $is_tips = ($product_mode === 'tips');
                     <?php endforeach; ?>
                 </tr>
                 <tr>
-                    <th class="sub-col">мес</th><th class="sub-col">цель/день</th>
+                    <th class="sub-col">мес</th><th class="sub-col">пр/день</th>
                     <th class="sub-col">мес</th><th class="sub-col">день</th>
                     <th class="sub-col">RR, об</th><th class="sub-col">ВП, %</th>
                     <?php foreach ($days_reverse as $d): ?>
@@ -984,7 +984,7 @@ $is_tips = ($product_mode === 'tips');
                         <?php endforeach; ?>
                     </tr>
                     <tr>
-                        <th class="sub-col">мес</th><th class="sub-col">цель/день</th>
+                        <th class="sub-col">мес</th><th class="sub-col">пр/день</th>
                         <th class="sub-col">мес</th><th class="sub-col">день</th>
                         <th class="sub-col">RR, об</th><th class="sub-col">ВП, %</th>
                         <?php foreach ($days_reverse as $d): ?>

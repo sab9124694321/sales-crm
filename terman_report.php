@@ -28,6 +28,15 @@ function unitLabel($unit) {
 }
 $unit_label = unitLabel($unit);
 
+// ── Цвет ячейки по выполнению плана оборота ──
+function oborotPlanStyle($fact, $plan) {
+    if ($plan <= 0) return '';
+    $pct = ($fact / $plan) * 100;
+    if ($pct >= 100) return 'background:#c8e6c9;color:#1b5e20;font-weight:600;';
+    if ($pct >= 70)  return 'background:#fff9c4;color:#795548;font-weight:600;';
+    return 'background:#ffcdd2;color:#b71c1c;font-weight:600;';
+}
+
 $check_date = null;
 $stmt = $pdo->prepare("SELECT performed_at FROM check_history WHERE check_type = 'performance' ORDER BY performed_at DESC LIMIT 1");
 $stmt->execute();
@@ -611,11 +620,11 @@ $is_tips = ($product_mode === 'tips');
                     <td style="font-weight:700;"><?= (int)$hg['total_rr'] ?></td>
                     <td><?= (int)$hg['total_vp'] ?>%</td>
                     <td><?= fmtMoney($hg['total_oborot_plan'], $unit) ?></td>
-                    <td><?= fmtMoney($hg['total_oborot_fact'], $unit) ?></td>
+                    <td style="<?= oborotPlanStyle($hg['total_oborot_fact'], $hg['total_oborot_plan']) ?>"><?= fmtMoney($hg['total_oborot_fact'], $unit) ?></td>
                     <td><?= fmtMoney($hg['oborot_rr'], $unit) ?></td>
                     <td><?= fmtMoney($hg['oborot_avg_day'], $unit) ?></td>
                     <td><?= fmtMoney($hg['oborot_plan_day'], $unit) ?></td>
-                    <td><?= fmtMoney($hg['oborot_last_day'], $unit) ?></td>
+                    <td style="<?= oborotPlanStyle($hg['oborot_last_day'], $hg['oborot_plan_day']) ?>"><?= fmtMoney($hg['oborot_last_day'], $unit) ?></td>
                     <?php foreach ($days_reverse as $d): ?>
                         <td><?= $hd[$d]['total'] ?: '' ?></td>
                         <td><?= $hd[$d]['keyv'] ?: '' ?></td>
@@ -637,11 +646,11 @@ $is_tips = ($product_mode === 'tips');
                     <td><?= (int)$terr['total_rr'] ?></td>
                     <td><?= (int)$terr['total_vp'] ?>%</td>
                     <td><?= fmtMoney($terr['total_oborot_plan'], $unit) ?></td>
-                    <td><?= fmtMoney($terr['total_oborot_fact'], $unit) ?></td>
+                    <td style="<?= oborotPlanStyle($terr['total_oborot_fact'], $terr['total_oborot_plan']) ?>"><?= fmtMoney($terr['total_oborot_fact'], $unit) ?></td>
                     <td><?= fmtMoney($terr['oborot_rr'], $unit) ?></td>
                     <td><?= fmtMoney($terr['oborot_avg_day'], $unit) ?></td>
                     <td><?= fmtMoney($terr['oborot_plan_day'], $unit) ?></td>
-                    <td><?= fmtMoney($terr['oborot_last_day'], $unit) ?></td>
+                    <td style="<?= oborotPlanStyle($terr['oborot_last_day'], $terr['oborot_plan_day']) ?>"><?= fmtMoney($terr['oborot_last_day'], $unit) ?></td>
                     <?php foreach ($days_reverse as $d): ?>
                         <td><?= $daily[$d]['total'] ?: '' ?></td>
                         <td><?= $daily[$d]['keyv'] ?: '' ?></td>
@@ -663,11 +672,11 @@ $is_tips = ($product_mode === 'tips');
                     <td><?= $grand['rr'] ?></td>
                     <td><?= $grand['vp'] ?>%</td>
                     <td><?= fmtMoney($grand['oborot_plan'], $unit) ?></td>
-                    <td><?= fmtMoney($grand['oborot_fact'], $unit) ?></td>
+                    <td style="<?= oborotPlanStyle($grand['oborot_fact'], $grand['oborot_plan']) ?>"><?= fmtMoney($grand['oborot_fact'], $unit) ?></td>
                     <td><?= fmtMoney($grand['oborot_rr'], $unit) ?></td>
                     <td><?= fmtMoney($grand['oborot_avg_day'], $unit) ?></td>
                     <td><?= fmtMoney($grand['oborot_plan_day'], $unit) ?></td>
-                    <td><?= fmtMoney($grand['oborot_last_day'], $unit) ?></td>
+                    <td style="<?= oborotPlanStyle($grand['oborot_last_day'], $grand['oborot_plan_day']) ?>"><?= fmtMoney($grand['oborot_last_day'], $unit) ?></td>
                     <?php foreach ($days_reverse as $d): ?>
                         <td><?= $grand['daily'][$d]['total'] ?: '' ?></td>
                         <td><?= $grand['daily'][$d]['keyv'] ?: '' ?></td>
@@ -758,10 +767,10 @@ $is_tips = ($product_mode === 'tips');
                         <td><?= $hg['total_rr'] ?></td>
                         <td><?= $hg['total_vp'] ?>%</td>
                         <td><?= fmtMoney($hg['total_oborot_plan'], $unit) ?></td>
-                        <td><?= fmtMoney($hg['total_oborot_fact'], $unit) ?></td>
+                        <td style="<?= oborotPlanStyle($hg['total_oborot_fact'], $hg['total_oborot_plan']) ?>"><?= fmtMoney($hg['total_oborot_fact'], $unit) ?></td>
                         <td><?= fmtMoney($hg['oborot_rr'], $unit) ?></td>
                         <td><?= fmtMoney($hg['oborot_plan_day'], $unit) ?></td>
-                        <td><?= fmtMoney($hg['oborot_last_day'], $unit) ?></td>
+                        <td style="<?= oborotPlanStyle($hg['oborot_last_day'], $hg['oborot_plan_day']) ?>"><?= fmtMoney($hg['oborot_last_day'], $unit) ?></td>
                         <?php
                         $hd = array_fill_keys($display_days, ['total'=>0,'keyv'=>0,'kas'=>0,'target'=>0,'pirate_turnover'=>0]);
                         foreach ($managers_list as $m) {
@@ -786,6 +795,10 @@ $is_tips = ($product_mode === 'tips');
                     <?php foreach ($managers_list as $m):
                         $t = $m['tabel_key']; if (empty($t)) continue;
                         $manager_comments_list = $manager_comments[$t] ?? [];
+                        // ── Дневной план по обороту для этого менеджера ──
+                        $m_daily_ob_plan = ($m['oborot_plan'] > 0 && $total_working_days > 0)
+                            ? ($m['oborot_plan'] / $total_working_days)
+                            : 0;
                     ?>
                         <tr data-tabel="<?= htmlspecialchars((string)$t) ?>">
                             <td></td>
@@ -819,10 +832,10 @@ $is_tips = ($product_mode === 'tips');
                             <td class="rr-col"><?= (int)$m['rr'] ?></td>
                             <td><?= (int)$m['vp'] ?>%</td>
                             <td><?= fmtMoney($m['oborot_plan'], $unit) ?></td>
-                            <td><?= fmtMoney($m['oborot_fact'], $unit) ?></td>
+                            <td style="<?= oborotPlanStyle($m['oborot_fact'], $m['oborot_plan']) ?>"><?= fmtMoney($m['oborot_fact'], $unit) ?></td>
                             <td><?= fmtMoney($m['oborot_rr'], $unit) ?></td>
                             <td><?= fmtMoney($m['oborot_plan_day'], $unit) ?></td>
-                            <td><?= fmtMoney($m['oborot_last_day'], $unit) ?></td>
+                            <td style="<?= oborotPlanStyle($m['oborot_last_day'], $m['oborot_plan_day']) ?>"><?= fmtMoney($m['oborot_last_day'], $unit) ?></td>
                             <?php foreach ($days_reverse as $d):
                                 $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
                                 $is_weekend = date('N', strtotime($date_str)) >= 6;
@@ -832,19 +845,23 @@ $is_tips = ($product_mode === 'tips');
                                 if ($is_weekend) $cell_class .= ' weekend';
                                 if ($absent) {
                                     $cell_class .= ' absence-mark';
-                                    $d_total = $d_keyv = $d_kas = $d_target = 'Н'; $d_ob = 'Н'; $style = '';
+                                    $d_total = $d_keyv = $d_kas = $d_target = 'Н'; $d_ob = 'Н';
+                                    $style = ''; $ob_style = '';
                                 } else {
                                     $d_total = $cnt['total']; $d_keyv = $cnt['keyv']; $d_kas = $cnt['kas']; $d_target = $cnt['target'];
                                     $d_ob = $cnt['pirate_turnover'] > 0 ? fmtMoney($cnt['pirate_turnover'], $unit) : '';
+                                    // штуки → по количеству (getDayColor)
                                     $c = getDayColor($cnt['total'], $colors);
                                     $style = "background:{$c['bg']};color:{$c['txt']}";
+                                    // оборот → по выполнению дневного плана оборота
+                                    $ob_style = oborotPlanStyle($cnt['pirate_turnover'], $m_daily_ob_plan);
                                 }
                             ?>
                                 <td class="<?= $cell_class ?>" style="<?= $style ?>" data-date="<?= $date_str ?>" data-tabel="<?= htmlspecialchars((string)$t) ?>" onclick="toggleAbsence('<?= htmlspecialchars((string)$t) ?>','<?= $date_str ?>')"><?= $d_total ?></td>
                                 <td class="<?= $cell_class ?>" style="<?= $style ?>" data-date="<?= $date_str ?>" data-tabel="<?= htmlspecialchars((string)$t) ?>"><?= $d_keyv ?></td>
                                 <td class="<?= $cell_class ?>" style="<?= $style ?>" data-date="<?= $date_str ?>" data-tabel="<?= htmlspecialchars((string)$t) ?>"><?= $d_kas ?></td>
                                 <td class="<?= $cell_class ?>" style="<?= $style ?>" data-date="<?= $date_str ?>" data-tabel="<?= htmlspecialchars((string)$t) ?>"><?= $d_target ?></td>
-                                <td class="<?= $cell_class ?>" style="<?= $style ?>" data-date="<?= $date_str ?>" data-tabel="<?= htmlspecialchars((string)$t) ?>"><?= $d_ob ?></td>
+                                <td class="<?= $cell_class ?>" style="<?= $ob_style ?>" data-date="<?= $date_str ?>" data-tabel="<?= htmlspecialchars((string)$t) ?>"><?= $d_ob ?></td>
                             <?php endforeach; ?>
                         </tr>
                     <?php endforeach; ?>
@@ -875,7 +892,7 @@ $is_tips = ($product_mode === 'tips');
                     <?php endforeach; ?>
                 </tr>
                 <tr>
-                    <th class="sub-col">мес</th><th class="sub-col">пр/день</th>
+                    <th class="sub-col">мес</th><th class="sub-col">в день</th>
                     <th class="sub-col">мес</th><th class="sub-col">день</th>
                     <th class="sub-col">RR, об</th><th class="sub-col">ВП, %</th>
                     <?php foreach ($days_reverse as $d): ?>
@@ -984,7 +1001,7 @@ $is_tips = ($product_mode === 'tips');
                         <?php endforeach; ?>
                     </tr>
                     <tr>
-                        <th class="sub-col">мес</th><th class="sub-col">пр/день</th>
+                        <th class="sub-col">мес</th><th class="sub-col">в день</th>
                         <th class="sub-col">мес</th><th class="sub-col">день</th>
                         <th class="sub-col">RR, об</th><th class="sub-col">ВП, %</th>
                         <?php foreach ($days_reverse as $d): ?>

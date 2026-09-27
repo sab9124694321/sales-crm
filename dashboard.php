@@ -733,7 +733,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
             <input type="hidden" name="registrations" id="reg_val" value="<?= $today_data['registrations']??0 ?>">
             <div class="inn-group">
                 <input type="text" id="inn_reg" placeholder="ИНН" style="flex:1; min-width:80px;">
-                <input type="number" id="turnover_reg" placeholder="Оборот, ₽" step="0.01" style="width:100px;">
+                <input type="number" id="turnover_reg" placeholder="Оборот по терминалу, ₽" step="0.01" style="width:100px;">
                 <label><input type="checkbox" id="key_reg" value="1"> Ключ.</label>
                 <select id="station_reg" style="font-size:0.8rem; padding:4px;">
                     <option value="newreg">Новорег</option>
@@ -750,7 +750,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
             <input type="hidden" name="pos_systems" id="pos_val" value="<?= $today_data['pos_systems']??0 ?>">
             <div class="inn-group">
                 <input type="text" id="inn_pos" placeholder="ИНН" style="flex:1; min-width:80px;">
-                <input type="number" id="turnover_pos" placeholder="Оборот, ₽" step="0.01" style="width:100px;">
+                <input type="number" id="turnover_pos" placeholder="Оборот по терминалу, ₽" step="0.01" style="width:100px;">
                 <label><input type="checkbox" id="key_pos" value="1"> Ключ.</label>
                 <select id="station_pos" style="font-size:0.8rem; padding:4px;">
                     <option value="newreg">Новорег</option>
@@ -767,7 +767,7 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
             <input type="hidden" name="smart_cash" id="smart_val" value="<?= $today_data['smart_cash']??0 ?>">
             <div class="inn-group">
                 <input type="text" id="inn_smart" placeholder="ИНН" style="flex:1; min-width:80px;">
-                <input type="number" id="turnover_smart" placeholder="Оборот, ₽" step="0.01" style="width:100px;">
+                <input type="number" id="turnover_smart" placeholder="Оборот по терминалу, ₽" step="0.01" style="width:100px;">
                 <label><input type="checkbox" id="key_smart" value="1"> Ключ.</label>
                 <select id="station_smart" style="font-size:0.8rem; padding:4px;">
                     <option value="newreg">Новорег</option>
@@ -777,14 +777,13 @@ $total_expected = array_sum(array_column($team_rows, 'expected'));
                 <button type="button" class="add-btn" onclick="addInn('smart')">+1</button>
             </div>
         </div>
-        <!-- Чаевые -->
+        <!-- Чаевые: убран ввод оборота по терминалу, т.к. оборот чаевых вводится в поле «💰 Оборот чаевых» выше -->
         <div class="form-group">
             <label>🍵 ИНН чаевые</label>
             <input type="text" name="inn_leads_display" id="inn_display" class="readonly-input" readonly value="<?= $today_data['inn_leads']??0 ?>">
             <input type="hidden" name="inn_leads" id="inn_val" value="<?= $today_data['inn_leads']??0 ?>">
             <div class="inn-group">
                 <input type="text" id="inn_tea" placeholder="ИНН" style="flex:1; min-width:80px;">
-                <input type="number" id="turnover_tea" placeholder="Оборот, ₽" step="0.01" style="width:100px;">
                 <label><input type="checkbox" id="key_tea" value="1"> Ключ.</label>
                 <select id="station_tea" style="font-size:0.8rem; padding:4px;">
                     <option value="newreg">Новорег</option>
@@ -992,7 +991,8 @@ function addInn(type) {
         display='inn_display';
         is_key = document.getElementById('key_tea').checked ? 1 : 0;
         station_type = document.getElementById('station_tea').value;
-        turnover = parseFloat(document.getElementById('turnover_tea').value) || 0;
+        // Оборот по чаевым вводится отдельно в поле «💰 Оборот чаевых»
+        turnover = 0;
     }
     if(!inn){ alert('Введите ИНН'); return; }
 
@@ -1023,7 +1023,9 @@ function addInn(type) {
                 disp.value = newVal;
             }
             document.getElementById('inn_'+type).value='';
-            document.getElementById('turnover_'+type).value='';
+            if (document.getElementById('turnover_'+type)) {
+                document.getElementById('turnover_'+type).value='';
+            }
             document.getElementById('key_'+type).checked = false;
             document.getElementById('station_'+type).value = 'newreg';
             alert('✅ Добавлено');

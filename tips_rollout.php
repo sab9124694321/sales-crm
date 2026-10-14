@@ -97,7 +97,7 @@ if (isset($_GET['export']) && $can_export) {
         }
     } else {
         $filename = 'СЗБ_Персональные_Чаевые_Реестр_' . date('Y-m-d') . '.csv';
-        $headers = ['TID (головной)', 'UUID команды чаевых', 'IMEI1', 'СН ККТ (стикер)', 'Подключены ранее', 'Ссылка'];
+        $headers = ['tid (головной)', 'uuid команды чаевых', 'imei1', 'СН ККТ (стикер)', 'ссылка на команду чаевых', 'подключены ли командные чаевые ранее?'];
         $rows = [];
         foreach ($records as $r) {
             $rows[] = [
@@ -105,8 +105,8 @@ if (isset($_GET['export']) && $can_export) {
                 $r['uuid'],
                 $r['imei1'],
                 $r['sn_kkt'],
-                $r['previously_connected'] ? 'Да' : 'Нет',
-                $r['link']
+                $r['link'],
+                $r['previously_connected'] ? 'Да' : 'Нет'
             ];
         }
     }

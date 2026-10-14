@@ -21,3 +21,7 @@ __pycache__/
 *.backup
 *.tar.gz
 sales.db
+backups/
+sales.db.*
+vendor/
+composer.lock

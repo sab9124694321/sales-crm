@@ -658,6 +658,7 @@ if (isset($_GET['export_stats']) && ($is_head || $role === 'admin' || $role === 
     <div class="nav">
         <a href="dashboard.php">Дашборд</a>
         <a href="calls.php">Я звоню</a>
+        <a href="contacts-finder/">🔍 Поиск контактов</a>
         <a href="rop_control.php">Контроль</a>
         <span style="margin-left:auto; font-size:0.8rem; color:#5f6368;"><?= htmlspecialchars($user_name) ?></span>
     </div>
